@@ -8,7 +8,7 @@ from datetime import datetime
 
 import customtkinter as ctk
 
-from config import load_config, BASE_DIR, resource_path
+from config import load_config, save_config, CONFIG_PATH, resource_path
 from obsidian_writer import ObsidianWriter
 from note_generator import generate_note, load_template, default_template_path, cleanup_figures
 from zotero_client import ZoteroClient, ZoteroError
@@ -122,6 +122,9 @@ class App(ctk.CTk):
         self.minsize(760, 500)
 
         self.cfg = load_config()
+        if not os.path.exists(CONFIG_PATH):
+            save_config(self.cfg)  # 首次启动：落盘默认配置，用户可直接编辑
+        load_template(self.cfg)  # 模板缺失时自动创建默认模板
         self.papers: list[dict] = []
         self.rows: dict[str, PaperRow] = {}
         self.writer = ObsidianWriter(self.cfg["vault_path"], self.cfg["notes_folder"])
