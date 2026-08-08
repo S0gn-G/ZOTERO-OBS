@@ -1,0 +1,5 @@
+customtkinter
+openai
+requests
+pdfplumber
+pymupdf

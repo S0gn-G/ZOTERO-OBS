@@ -1,0 +1,13 @@
+{
+  "zotero_base": "http://127.0.0.1:23119/api/",
+  "vault_path": "",
+  "notes_folder": "LiteratureNotes",
+  "template_path": "",
+  "llm_base_url": "https://api.deepseek.com/v1",
+  "llm_api_key": "",
+  "llm_model": "deepseek-chat",
+  "llm_enabled": true,
+  "overwrite": false,
+  "only_with_pdf": true,
+  "use_pdf_text": true
+}

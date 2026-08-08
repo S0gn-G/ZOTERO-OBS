@@ -1,0 +1,14 @@
+# 本地真实配置（含个人 API Key / vault 路径），不得入库；仓库提供 config.example.json
+config.json
+
+# 本地启动脚本（含 D 盘绝对路径，仅本机用）
+ZotNotes.vbs
+
+# PyInstaller 产物
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.log
