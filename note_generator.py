@@ -22,7 +22,7 @@ import fitz
 from openai import OpenAI
 
 from config import BASE_DIR
-from obsidian_writer import note_stem
+from obsidian_writer import default_note_filename, note_stem
 
 PDF_MAX_CHARS = 30000  # 深度笔记需要更多证据
 
@@ -336,8 +336,7 @@ def _client(cfg: dict) -> OpenAI:
     )
 
 
-# 领域画像：config 里 llm_profile 可覆盖（空则用默认 SR/ReID 画像），
-# 使工具可服务任意研究领域，而不是写死某两个子方向。
+# 领域画像：config 里 llm_profile 可覆盖，留空使用通用学术研究者设定。
 DEFAULT_DOMAIN_PROFILE = "你是一名严谨的学术研究者"
 
 
@@ -373,7 +372,7 @@ JSON 结构：
 
 
 def PLAN_SYSTEM(cfg: dict) -> str:
-    return PLAN_SYSTEM_TMPL.format(profile=_domain_profile(cfg))
+    return PLAN_SYSTEM_TMPL.replace("{profile}", _domain_profile(cfg))
 
 
 def _plan_user(bundle: dict) -> str:
@@ -495,7 +494,7 @@ WRITE_SYSTEM_TMPL = """{profile}，正在为同行写一份
 
 
 def WRITE_SYSTEM(cfg: dict) -> str:
-    return WRITE_SYSTEM_TMPL.format(profile=_domain_profile(cfg))
+    return WRITE_SYSTEM_TMPL.replace("{profile}", _domain_profile(cfg))
 
 
 def _write_user(bundle: dict, plan: dict, image_dir: str) -> str:
@@ -710,15 +709,15 @@ def render_skeleton(paper: dict, note_file: str, reason: str) -> str:
 def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
     """多阶段深度笔记管道。返回：
     {"content": str, "figures": [figure_dict...], "status": "ok"|"abstract_only"|"needs_source"}
-    文件名与图片目录统一用唯一 stem（<safe citekey>-<zotero key>），杜绝 citekey sanitize 碰撞。
+    笔记默认以论文标题命名；图片目录使用唯一 stem（<safe citekey>-<zotero key>）。
     LLM 调用失败时抛异常并清理暂存图表；成功后由调用方拷贝图表并调 cleanup_figures。
     """
-    stem = note_stem(note_key, paper["key"])
-    note_file = stem + ".md"
+    image_stem = note_stem(note_key, paper["key"])
+    note_file = default_note_filename(paper["title"])
     pdf_text = _extract_pdf_text(paper.get("pdf_path"))
     figures: list[dict] = []
     if pdf_text:
-        figures = _extract_figures(paper.get("pdf_path"), stem)
+        figures = _extract_figures(paper.get("pdf_path"), image_stem)
 
     # 证据等级三级：fulltext（读全正文）/ abstract_only（仅摘要）/ none（无证据）
     abstract = (paper.get("abstract") or "").strip()
@@ -739,12 +738,12 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
     bundle = _build_bundle(paper, pdf_text, figures)
     try:
         plan = llm_plan(bundle, cfg)
-        body = llm_write(bundle, plan, cfg, stem)
-        issues = lint_note(body, plan, figures, stem)
+        body = llm_write(bundle, plan, cfg, image_stem)
+        issues = lint_note(body, plan, figures, image_stem)
         if issues:
             try:
                 body = llm_fix(body, issues, cfg, bundle)
-                issues = lint_note(body, plan, figures, stem)  # 二次校验修复结果
+                issues = lint_note(body, plan, figures, image_stem)  # 二次校验修复结果
             except Exception:
                 pass  # 修复调用失败保留原稿，按首次 lint 结果判定
             if issues:

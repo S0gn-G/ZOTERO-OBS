@@ -43,14 +43,14 @@ class PaperRow:
         self.note_key = note_key
         self.note_state = note_state
         self.updated_at = updated_at
+        self._hovered = False
+        self._hover_job = None
         self.frame = ctk.CTkFrame(
             parent, corner_radius=15, border_width=1,
             border_color=ui.BORDER, fg_color=ui.SURFACE,
         )
         self.frame.pack(fill="x", pady=6, padx=2)
         self.frame.grid_columnconfigure(2, weight=1)
-        self.frame.bind("<Enter>", lambda _e: self._hover(True))
-        self.frame.bind("<Leave>", lambda _e: self._hover(False))
 
         self.accent = ctk.CTkFrame(
             self.frame, width=4, height=50, corner_radius=2, fg_color="transparent"
@@ -116,7 +116,32 @@ class PaperRow:
                 command=lambda: on_open_pdf(paper["key"]),
             ).pack(side="right")
 
+        self._bind_hover_tree(self.frame)
+
+    def _bind_hover_tree(self, widget):
+        """让卡片内所有子控件共用整张卡片的悬停命中区。"""
+        widget.bind("<Enter>", self._schedule_hover_sync, add="+")
+        widget.bind("<Leave>", self._schedule_hover_sync, add="+")
+        for child in widget.winfo_children():
+            self._bind_hover_tree(child)
+
+    def _schedule_hover_sync(self, _event=None):
+        if self._hover_job is not None:
+            self.frame.after_cancel(self._hover_job)
+        self._hover_job = self.frame.after_idle(self._sync_hover)
+
+    def _sync_hover(self):
+        self._hover_job = None
+        pointer_x, pointer_y = self.frame.winfo_pointerxy()
+        left, top = self.frame.winfo_rootx(), self.frame.winfo_rooty()
+        inside = (
+            left <= pointer_x < left + self.frame.winfo_width()
+            and top <= pointer_y < top + self.frame.winfo_height()
+        )
+        self._hover(inside)
+
     def _hover(self, on: bool):
+        self._hovered = on
         if not self.selected():
             self.frame.configure(fg_color=ui.SURFACE_HOVER if on else ui.SURFACE)
 
@@ -127,7 +152,11 @@ class PaperRow:
 
     def _apply_selection_style(self, selected: bool):
         self.frame.configure(
-            fg_color=ui.SURFACE_SELECTED if selected else ui.SURFACE,
+            fg_color=(
+                ui.SURFACE_SELECTED if selected
+                else ui.SURFACE_HOVER if self._hovered
+                else ui.SURFACE
+            ),
             border_color=ui.ACCENT if selected else ui.BORDER,
         )
         self.accent.configure(fg_color=ui.ACCENT if selected else "transparent")
@@ -626,7 +655,8 @@ class App(ctk.CTk):
             result = generate_note(row.paper, cfg, note_key=row.note_key)
             figures = result["figures"]
             missing = writer.commit_generation(
-                row.note_key, result["content"], figures, zotero_key=row.paper["key"])
+                row.note_key, result["content"], figures,
+                zotero_key=row.paper["key"], note_title=row.paper["title"])
             if missing:
                 return False, "failed", f"图表拷贝失败：{', '.join(missing)}"
             return True, result["status"], "OK"
@@ -716,6 +746,7 @@ class App(ctk.CTk):
         need = sum(1 for _, s, r in results if s == "needs_source")
         abstract = sum(1 for _, s, r in results if s == "abstract_only")
         failed = sum(1 for _, s, _r in results if s == "failed")
+        first_error = next((r for _, s, r in results if s == "failed" and r), "")
         for key, s, r in results:
             row = self.rows.get(key)
             if not row:
@@ -745,6 +776,8 @@ class App(ctk.CTk):
         if failed:
             parts.append(f"失败 {failed}")
         self._set_status("完成 · " + " · ".join(parts))
+        if first_error:
+            self._set_info(f"首个错误：{first_error[:80]}")
 
     # ---------- PDF ----------
     def open_pdf(self, key: str):

@@ -1,5 +1,5 @@
-"""路径与转义安全测试：safe_citekey 防目录穿越 / Windows 保留名 / note_stem 唯一 / YAML 转义。"""
-from obsidian_writer import safe_citekey, note_stem
+"""路径与转义安全测试：citekey、论文标题、图片目录与 YAML 转义。"""
+from obsidian_writer import default_note_filename, safe_citekey, safe_note_title, note_stem
 from note_generator import _yaml_escape, _placeholder_vals
 
 
@@ -48,6 +48,17 @@ def test_safe_citekey_windows_reserved_names():
     assert safe_citekey("CON.md") == "_CON.md"  # 保留设备名即使带扩展名也非法
     assert safe_citekey("con") == "_con"  # 大小写不敏感
     assert safe_citekey("paper") == "paper"  # 正常名不受影响
+
+
+def test_safe_note_title_keeps_unicode_and_replaces_windows_invalid_chars():
+    assert safe_note_title("用大模型赋能 VI-ReID") == "用大模型赋能 VI-ReID"
+    assert safe_note_title("S3-CLIP: video SR / person-ReID") == "S3-CLIP - video SR - person-ReID"
+    assert default_note_filename("Auto-Encoding Variational Bayes") == "Auto-Encoding Variational Bayes.md"
+
+
+def test_safe_note_title_handles_reserved_and_long_names():
+    assert safe_note_title("CON") == "_CON"
+    assert len(safe_note_title("A" * 200)) == 140
 
 
 def test_note_stem_unique_across_sanitize_collision():

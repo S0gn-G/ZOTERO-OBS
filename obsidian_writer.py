@@ -41,10 +41,23 @@ def safe_citekey(key: str, fallback: str = "note") -> str:
 
 
 def note_stem(citation_key: str, zotero_key: str) -> str:
-    """唯一文件名/图片目录片段：<safe citekey>-<zotero key>。
+    """唯一图片目录片段：<safe citekey>-<zotero key>。
 
     zotero key 全局稳定唯一，即使不同 citekey sanitize 后碰撞也不会互相覆盖。"""
     return f"{safe_citekey(citation_key)}-{zotero_key}"
+
+
+def safe_note_title(title: str, fallback: str = "Untitled") -> str:
+    """把论文标题转换为可读且可在 Windows/Obsidian 中使用的文件名。"""
+    s = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', " - ", (title or "").strip())
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    if s.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        s = "_" + s
+    return (s[:140].rstrip(" .") or fallback)
+
+
+def default_note_filename(title: str) -> str:
+    return safe_note_title(title) + ".md"
 
 
 def _section_body(content: str, heading: str, until: str | None) -> str | None:
@@ -112,8 +125,10 @@ class ObsidianWriter:
             return note_stem(citation_key, zotero_key)
         return safe_citekey(citation_key)
 
-    def note_path(self, citation_key: str, zotero_key: str | None = None) -> str:
-        return os.path.join(self.notes_dir, f"{self._stem(citation_key, zotero_key)}.md")
+    def note_path(self, citation_key: str, zotero_key: str | None = None,
+                  note_title: str | None = None) -> str:
+        stem = safe_note_title(note_title) if note_title else self._stem(citation_key, zotero_key)
+        return os.path.join(self.notes_dir, f"{stem}.md")
 
     def scan_states(self) -> list[tuple[str, str, float]]:
         """单次扫描笔记目录，返回 [(zotero_key, state, mtime)]。
@@ -204,33 +219,44 @@ class ObsidianWriter:
         except OSError:
             return None
 
-    def _resolve_write_path(self, citation_key: str, zotero_key: str | None = None) -> str:
+    def _resolve_write_path(self, citation_key: str, zotero_key: str | None = None,
+                            note_title: str | None = None) -> str:
         """确定写入路径，归属校验 fail-closed。
 
-        目标（<safe citekey>-<zotero key>.md）存在且属于本文 → 用目标；否则按 zotero_key
-        定位用户改过名的旧笔记；都没有且目标被他人（含无 frontmatter 的人工文件）占用 →
-        抛 NotePathConflict，绝不覆盖。"""
-        target = self.note_path(citation_key, zotero_key)
+        优先按 zotero_key 定位已有笔记，因而允许用户自由改名。新笔记默认以论文标题命名；
+        同名文件被其他内容占用时追加 Zotero key，绝不覆盖。"""
+        existing = self._find_note_by_key(zotero_key) if zotero_key else None
+        if existing:
+            return existing
+
+        target = self.note_path(citation_key, zotero_key, note_title)
+        if not os.path.exists(target):
+            return target
+
+        if note_title and zotero_key:
+            collision = os.path.join(
+                self.notes_dir,
+                f"{safe_note_title(note_title)} - {safe_citekey(zotero_key)}.md",
+            )
+            if not os.path.exists(collision):
+                return collision
+            if self._zotero_key_of(collision) == zotero_key:
+                return collision
+            raise NotePathConflict(collision, citation_key)
+
         if os.path.exists(target):
             owner = self._zotero_key_of(target)
             if owner == (zotero_key or citation_key):
                 return target
-            if zotero_key:
-                renamed = self._find_note_by_key(zotero_key)
-                if renamed:
-                    return renamed
             raise NotePathConflict(target, citation_key)
-        if zotero_key:
-            renamed = self._find_note_by_key(zotero_key)
-            if renamed:
-                return renamed
-        return target
 
-    def write_note_preserving(self, citation_key: str, content: str, zotero_key: str | None = None) -> str:
-        """写笔记，保留旧笔记的「我的笔记/疑问」手写区，frontmatter note_file 按实际文件名同步。
+    def write_note_preserving(self, citation_key: str, content: str,
+                              zotero_key: str | None = None,
+                              note_title: str | None = None) -> str:
+        """写笔记，保留手写区，并把 note_file 同步为用户当前使用的实际文件名。
 
         目标文件被其他文献/无 frontmatter 文件占用且无改名旧笔记时抛 NotePathConflict。"""
-        path = self._resolve_write_path(citation_key, zotero_key)
+        path = self._resolve_write_path(citation_key, zotero_key, note_title)
         old = ""
         if os.path.exists(path):
             try:
@@ -282,7 +308,8 @@ class ObsidianWriter:
             shutil.rmtree(backup, ignore_errors=True)
 
     def commit_generation(self, citation_key: str, content: str, figures: list[dict],
-                          zotero_key: str | None = None) -> list[str]:
+                          zotero_key: str | None = None,
+                          note_title: str | None = None) -> list[str]:
         """Markdown 与图片作为整体事务交付：失败回滚到旧态，绝不产生「旧笔记 + 新图」。
 
         1. 无图 → 仅写笔记（保留手写区），返回 []。
@@ -292,7 +319,7 @@ class ObsidianWriter:
         任一步失败：恢复旧 Markdown（原不存在则删除新文件）、恢复旧图片目录、清理 tmp 后 raise。
         返回缺失文件名列表（空 = 已提交）。"""
         if not figures:
-            self.write_note_preserving(citation_key, content, zotero_key)
+            self.write_note_preserving(citation_key, content, zotero_key, note_title)
             return []
         dest_dir = os.path.join(self.notes_dir, "images", self._stem(citation_key, zotero_key))
         missing = self._stage_images(dest_dir, figures)
@@ -303,7 +330,7 @@ class ObsidianWriter:
         existed = False
         old = ""
         try:
-            path = self._resolve_write_path(citation_key, zotero_key)
+            path = self._resolve_write_path(citation_key, zotero_key, note_title)
             if os.path.exists(path):
                 existed = True
                 try:

@@ -4,7 +4,7 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 
 - 源码：<https://github.com/westriver-moon/ZOTERO-OBS>
 - Windows 成品：<https://github.com/westriver-moon/ZOTERO-OBS/releases>
-- 当前发行版：`v0.2.0-rc.1`
+- 当前发行版：`v0.2.0-rc.2`
 
 ## 使用条件
 
@@ -36,6 +36,8 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 | 需处理 | 需原文、仅摘要、需修复或上次生成失败的条目 |
 
 “全选当前列表”只选择当前搜索与筛选结果。“PDF”按钮使用系统默认阅读器打开附件。批量生成最多并发处理 3 篇文献。
+
+论文卡片的整块区域共享同一悬停状态；鼠标经过标题、状态、空白处或操作按钮时不会反复闪烁。批量任务失败时，界面会在汇总状态之外直接显示首个具体错误，便于定位问题。
 
 ## 状态含义
 
@@ -91,7 +93,7 @@ Zotero 本地 API
 
 证据不足时程序不会要求模型猜测：没有 PDF 正文但有摘要时标记为“仅摘要”；正文和摘要都没有时生成“需原文”骨架。模型生成内容经校验后最多修复一次；仍有问题则本次生成失败，不写入残缺结果。
 
-笔记文件默认采用 `<安全 citekey>-<Zotero key>.md`，图片位于 `images/<安全 citekey>-<Zotero key>/`。程序根据 frontmatter 中的 `zotero_key` 定位已有笔记，因此可以在输出目录及其子目录中改名或移动笔记。若同一 Zotero key 对应多份笔记，程序会报告冲突，不会任选一份覆盖。
+笔记文件默认直接使用论文标题，例如 `Auto-Encoding Variational Bayes.md`。Windows 文件名中的非法字符会替换为连字符；只有论文标题与已有文件冲突时才追加 Zotero key。图片仍位于稳定的 `images/<安全 citekey>-<Zotero key>/`。程序根据 frontmatter 中的 `zotero_key` 定位已有笔记，因此用户可以在输出目录及其子目录中自由改名或移动笔记，重新生成不会把名称改回。若同一 Zotero key 对应多份笔记，程序会报告冲突，不会任选一份覆盖。
 
 重新生成时，Markdown 和图片通过暂存、切换与回滚作为一个整体提交，避免新笔记与旧图片混用。任何图片缺失或提交失败都会撤销本次写入。
 
@@ -114,7 +116,7 @@ Zotero 本地 API
 |---|---|
 | 本地配置 | 源码目录或 exe 同目录的 `config.json` |
 | 默认模板 | 源码目录或 exe 同目录的 `template.md` |
-| 笔记 | `notes_path/<safe-citekey>-<zotero-key>.md`，也可位于其子目录 |
+| 笔记 | `notes_path/<论文标题>.md`；同名冲突时追加 Zotero key，也可由用户改名或移入子目录 |
 | 图片 | `notes_path/images/<safe-citekey>-<zotero-key>/` |
 | 主题与图标 | `theme.json`、`icon.ico`；打包时内置，同目录文件可覆盖 |
 | Zotero 数据源 | `http://127.0.0.1:23119/api/` |
@@ -123,6 +125,41 @@ Zotero 本地 API
 界面优先使用免费开源的 Noto Sans SC；系统没有该字体时由 Tk 使用系统字体替代。字体文件没有打进仓库或 exe。
 
 ## 当前架构
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Noto Sans SC, Microsoft YaHei, sans-serif"}}}%%
+flowchart TB
+    ZOTERO["Zotero 7 本地 API"] -->|"分页读取"| ZCLIENT["zotero_client.py<br/>元数据与附件解析"]
+    ZCLIENT -->|"文献列表"| APP["gui/app.py<br/>搜索、筛选与任务调度"]
+    APP -->|"单篇 / 批量任务"| WORKERS["工作线程<br/>最多并发 3 篇"]
+    WORKERS --> GENERATOR["note_generator.py<br/>证据提取、写作与校验"]
+    GENERATOR -->|"已校验内容 + 临时图表"| WRITER["obsidian_writer.py<br/>定位、合并与事务提交"]
+    WRITER -->|"原子提交 / 完整回滚"| NOTES["notes_path<br/>Markdown + images/"]
+
+    ENTRY["main.py<br/>程序入口"] --> APP
+    SETTINGS["gui/settings_view.py<br/>六项设置"] --> APP
+    VISUAL["gui/design.py + gui/icons.py<br/>视觉系统"] --> APP
+
+    CFGFILE["config.json"] <--> CONFIG["config.py<br/>迁移与原子保存"]
+    CONFIG -->|"读取 / 保存"| APP
+    THEME["theme.json + icon.ico"] --> VISUAL
+
+    PDF["PDF 正文与图表"] --> GENERATOR
+    TEMPLATE["template.md"] -->|"渲染结构"| GENERATOR
+    GENERATOR <-->|"规划、写作、修复"| LLM["OpenAI 兼容接口"]
+
+    classDef source fill:#E8F5E9,stroke:#4F8A66,color:#173D2A,stroke-width:1px;
+    classDef ui fill:#F2F8F4,stroke:#74A487,color:#173D2A,stroke-width:1px;
+    classDef core fill:#DDF1E4,stroke:#2F7650,color:#123622,stroke-width:1.5px;
+    classDef storage fill:#F7FAF8,stroke:#8AA697,color:#263A30,stroke-width:1px;
+
+    class ZOTERO,PDF,LLM source;
+    class ENTRY,APP,SETTINGS,VISUAL,WORKERS ui;
+    class ZCLIENT,GENERATOR,WRITER,CONFIG core;
+    class CFGFILE,THEME,TEMPLATE,NOTES storage;
+```
+
+界面层只负责交互和任务编排；核心服务分别处理配置、Zotero、生成与写入。生成内容必须通过校验后才交给写入层，Markdown 与图片作为同一事务提交。
 
 | 模块 | 职责 |
 |---|---|

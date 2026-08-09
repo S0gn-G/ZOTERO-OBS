@@ -46,12 +46,40 @@ def test_write_note_preserving_finds_renamed_note(tmp_path):
     with open(renamed, "w", encoding="utf-8") as f:
         f.write("---\nzotero_key: \"K1\"\n---\n\n# Old\n\n## 我的笔记\n\n手写内容\n\n## 疑问\n")
     new_content = "---\nzotero_key: \"K1\"\n---\n\n# New\n\n## 我的笔记\n\n\n## 疑问\n"
-    written = w.write_note_preserving("cite2022", new_content, zotero_key="K1")
+    written = w.write_note_preserving(
+        "cite2022", new_content, zotero_key="K1", note_title="A New Paper Title"
+    )
     assert written == renamed  # 写入用户实际路径，不产生第二份
     assert os.path.exists(renamed)
     assert not os.path.exists(os.path.join(w.notes_dir, "cite2022-K1.md"))
     with open(renamed, encoding="utf-8") as f:
         assert "手写内容" in f.read()
+
+
+def test_write_note_preserving_uses_readable_paper_title_by_default(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    content = '---\nzotero_key: "K1"\nnote_file: "old.md"\n---\n\n# X\n'
+
+    written = w.write_note_preserving(
+        "cite2022", content, zotero_key="K1", note_title="S3-CLIP: video SR / person-ReID"
+    )
+
+    assert written == os.path.join(w.notes_dir, "S3-CLIP - video SR - person-ReID.md")
+    with open(written, encoding="utf-8") as f:
+        assert 'note_file: "S3-CLIP - video SR - person-ReID.md"' in f.read()
+
+
+def test_same_title_collision_appends_zotero_key(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    p1 = w.write_note_preserving(
+        "cite1", '---\nzotero_key: "K1"\n---\n', zotero_key="K1", note_title="Same Title"
+    )
+    p2 = w.write_note_preserving(
+        "cite2", '---\nzotero_key: "K2"\n---\n', zotero_key="K2", note_title="Same Title"
+    )
+
+    assert os.path.basename(p1) == "Same Title.md"
+    assert os.path.basename(p2) == "Same Title - K2.md"
 
 
 def test_write_note_preserving_creates_target_when_no_old(tmp_path):
@@ -167,6 +195,23 @@ def test_owner_match_preserves_handwritten(tmp_path):
     assert "手写内容" in target.read_text(encoding="utf-8")
 
 
+def test_owner_match_still_rejects_duplicate_key(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    target = tmp_path / "Notes" / "cite-K1.md"
+    duplicate = tmp_path / "Notes" / "subfolder" / "duplicate.md"
+    target.parent.mkdir(parents=True)
+    duplicate.parent.mkdir(parents=True)
+    old = '---\nzotero_key: "K1"\n---\n\n# Old\n'
+    target.write_text(old, encoding="utf-8")
+    duplicate.write_text(old, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="重复 Zotero 笔记"):
+        w.write_note_preserving("cite", '---\nzotero_key: "K1"\n---\n\n# New\n', zotero_key="K1")
+
+    assert target.read_text(encoding="utf-8") == old
+    assert duplicate.read_text(encoding="utf-8") == old
+
+
 def test_note_file_synced_to_renamed_basename(tmp_path):
     w = ObsidianWriter(str(tmp_path / "Notes"))
     os.makedirs(w.notes_dir, exist_ok=True)
@@ -194,6 +239,23 @@ def test_commit_generation_success_commits_both(tmp_path):
     assert (tmp_path / "Notes" / "images" / "cite-K1" / "fig_1.png").read_bytes() == b"NEW"
     assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
     assert not (tmp_path / "Notes" / "images" / "cite-K1.old").exists()
+
+
+def test_commit_generation_uses_title_for_note_and_stable_stem_for_images(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    src = tmp_path / "fig_1.png"
+    src.write_bytes(b"NEW")
+    content = '---\nzotero_key: "K1"\nnote_file: "old.md"\n---\n\n# Paper\n'
+
+    w.commit_generation(
+        "cite", content, [_fig("fig_1.png", src)],
+        zotero_key="K1", note_title="Paper: Human-readable title",
+    )
+
+    note = tmp_path / "Notes" / "Paper - Human-readable title.md"
+    assert note.exists()
+    assert 'note_file: "Paper - Human-readable title.md"' in note.read_text(encoding="utf-8")
+    assert (tmp_path / "Notes" / "images" / "cite-K1" / "fig_1.png").exists()
 
 
 def test_commit_generation_no_figures_writes_note_only(tmp_path):
