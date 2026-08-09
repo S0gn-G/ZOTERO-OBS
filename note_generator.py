@@ -49,8 +49,8 @@ def _extract_pdf_text(pdf_path: str, max_chars: int = PDF_MAX_CHARS) -> str:
 # ---------------- 图表提取（Stage 2） ----------------
 
 
-# 图注识别：Figure/Fig. 与 Table/Tab.，捕获类型与编号
-CAPTION_RE = re.compile(r"(?im)^\s*(?:(Figure|Fig\.?)|(Table|Tab\.?))\s+(\d+)[.:]\s*(.*)$")
+# 图注识别：Figure/Fig. 与 Table/Tab.，编号支持阿拉伯（1/2）与罗马（I/II），捕获类型与编号
+CAPTION_RE = re.compile(r"(?im)^\s*(?:(Figure|Fig\.?)|(Table|Tab\.?))\s+(\d{1,3}|[IVXLCDM]{1,8})[.:]\s*(.*)$")
 MIN_FIG_H = 60          # 渲染区域最小高度（像素，过滤装饰性图注）
 FIG_SCALE = 2.0         # 渲染缩放
 FIG_CAPTION_MAX_GAP = 60  # 图/表与其 caption 之间允许的最大空隙（点）
@@ -58,6 +58,8 @@ FIG_MAX_HEIGHT = 360      # fig 从 caption 向上最多找多高
 MARGIN_TOP = 55.0         # 页边距上界
 MARGIN_BOTTOM = 40.0      # 页边距下界
 MARGIN_LEFT = 45.0        # 页边距左界
+TABLE_MAX_HEIGHT = 220    # 兜底：无表格 bbox 时表高上限，避免截到页底
+TABLE_PAD = 8             # 表格 bbox 顶/底外扩 padding
 
 
 def _page_captions(doc, page_no: int) -> list[dict]:
@@ -76,7 +78,8 @@ def _page_captions(doc, page_no: int) -> list[dict]:
             continue
         kind = "table" if m.group(2) else "fig"
         x0, y0, x1, y1 = block["bbox"]
-        caps.append({"kind": kind, "num": int(m.group(3)), "y0": y0, "y1": y1,
+        # num 保持字符串：阿拉伯（"1"/"2"）与罗马（"I"/"II"）都直接进文件名
+        caps.append({"kind": kind, "num": m.group(3), "y0": y0, "y1": y1,
                      "x0": x0, "x1": x1, "text": text})
     caps.sort(key=lambda c: c["y0"])
     return caps
@@ -93,24 +96,40 @@ def _image_rects(page) -> list:
         return []
 
 
-def _clip_region(cap, next_cap, image_rects, prev_bottom, margin_top, page_w, page_h):
+def _table_rects(page) -> list:
+    """find_tables 检测到的表格矩形列表（Table 图注向下关联定底边）。异常返回空。"""
+    try:
+        return [fitz.Rect(*t.bbox) for t in page.find_tables().tables]
+    except Exception:
+        return []
+
+
+def _clip_region(cap, next_cap, image_rects, table_rects, prev_bottom, margin_top, page_w, page_h):
     """按图注类型计算裁剪区 (x0, y0, x1, y1)。
 
-    fig（图注在图下方）：默认裁 caption 上方，可用内嵌图片 bbox 在 gap 内上探；
-    table（图注在表格上方）：默认裁 caption 下方，向下探到 next caption 或页底。
+    fig（图注在图下方）：裁 caption 上方，可用内嵌图片 bbox 在 gap 内上探；
+       prev_bottom 封顶到 y1 - MIN_FIG_H，上张表吞到近 caption 时仍保证本图高度。
+    table（图注在表格上方）：优先关联 caption 下方最近的表格 bbox 定底边（精确）；
+       无 bbox 时兜底裁到 y0 + TABLE_MAX_HEIGHT，不再截到页底/next caption。
     返回 y 区间为 [y0, y1)；过矮区间由调用方跳过。"""
     x0 = MARGIN_LEFT
     x1 = max(page_w - MARGIN_LEFT, MARGIN_LEFT + 100)
     if cap["kind"] == "table":
         y0 = max(margin_top, prev_bottom, cap["y1"] + 4)
-        y1 = (next_cap["y0"] - 4) if next_cap else (page_h - MARGIN_BOTTOM)
-        for r in image_rects:
-            if 0 <= r.y0 - cap["y1"] <= FIG_CAPTION_MAX_GAP and r.y1 > cap["y1"] \
-                    and r.x1 > x0 and r.x0 < x1:
-                y1 = max(y1, r.y1)
+        next_bound = (next_cap["y0"] - 4) if next_cap else (page_h - MARGIN_BOTTOM)
+        cands = [r for r in table_rects
+                 if 0 <= r.y0 - cap["y1"] <= FIG_CAPTION_MAX_GAP
+                 and r.y1 > cap["y1"] and r.x1 > x0 and r.x0 < x1]
+        if cands:  # 主选：最靠近 caption 的表格 bbox
+            best = min(cands, key=lambda r: r.y0)
+            y0 = max(y0, best.y0 - TABLE_PAD)
+            y1 = min(next_bound, best.y1 + TABLE_PAD)
+        else:  # 兜底：保守高度
+            y1 = min(next_bound, y0 + TABLE_MAX_HEIGHT)
     else:  # fig
         y1 = cap["y0"] - 4
-        y0 = max(margin_top, prev_bottom, y1 - FIG_MAX_HEIGHT)
+        top_bound = min(prev_bottom, y1 - MIN_FIG_H)
+        y0 = max(margin_top, top_bound, y1 - FIG_MAX_HEIGHT)
         for r in image_rects:
             if 0 <= cap["y0"] - r.y1 <= FIG_CAPTION_MAX_GAP and r.y0 < cap["y0"] \
                     and r.x1 > x0 and r.x0 < x1:
@@ -122,7 +141,7 @@ def _extract_figures(pdf_path: str, seed: str) -> list[dict]:
     """按图注定位并渲染 PDF 中的图表区域（能抓住矢量 pipeline/架构图）。
 
     Figure：图注在下方，裁图注上方区域，可用内嵌图片 bbox 上探（允许合理 gap）；
-    Table：图注在表格上方，裁图注下方直到下一个图注或页底。
+    Table：图注在表格上方，优先用 find_tables() 的 bbox 精确裁剪，无 bbox 时保守高度兜底。
     横向放宽到正文整页宽度（图注通常比图本身窄，不能按图注宽度裁剪）。
     暂存到临时目录。返回 [{name, page, caption, staging_path}]。无图注的页不提取。
     """
@@ -145,11 +164,12 @@ def _extract_figures(pdf_path: str, seed: str) -> list[dict]:
             page_w = page.rect.width
             page_h = page.rect.height
             image_rects = _image_rects(page)
+            table_rects = _table_rects(page)
             prev_bottom = MARGIN_TOP
             for i, cap in enumerate(caps):
                 next_cap = caps[i + 1] if i + 1 < len(caps) else None
-                x0, y0, x1, y1 = _clip_region(cap, next_cap, image_rects, prev_bottom,
-                                              MARGIN_TOP, page_w, page_h)
+                x0, y0, x1, y1 = _clip_region(cap, next_cap, image_rects, table_rects,
+                                              prev_bottom, MARGIN_TOP, page_w, page_h)
                 if y1 - y0 < MIN_FIG_H:
                     prev_bottom = cap["y1"]
                     continue
@@ -163,7 +183,7 @@ def _extract_figures(pdf_path: str, seed: str) -> list[dict]:
                     prev_bottom = cap["y1"]
                     continue
                 figs.append({"name": name, "page": pno, "caption": cap["text"], "staging_path": path})
-                prev_bottom = cap["y1"] if cap["kind"] == "fig" else max(prev_bottom, y1)
+                prev_bottom = y1
     except Exception:
         pass  # 渲染部分失败返回已有图；doc 由 finally 保证关闭
     finally:
@@ -456,14 +476,14 @@ WRITE_SYSTEM_TMPL = """{profile}，正在为同行写一份
 （作者承认的 + 读者能观察到的"没被证明的东西"）
 
 ## 与我的研究的关系
-（与 SR / ReID 领域的交叉点、可复用的思路、与主流方法的差异）
+（与我的研究领域的交叉点、可复用的思路、与主流方法的差异）
 
 图表引用：对写作计划 figures_to_reference 里的每个文件，在引用它的章节（通常在方法主线或实验）
 插入：
-![图注说明](images/<note_key>/<文件名>)
+![图注说明](images/<image_dir>/<文件名>)
 
 格式规则（Obsidian 渲染约束，必须遵守）：
-- 表格单元格内禁用行内公式 $...$ 或 $$...$$（Obsidian 表格内公式渲染异常），单元格内的符号用纯文本或反引号代码，如 `I_SR` 而非 $I_{SR}$。
+- 表格单元格内禁用行内公式 $...$ 或 $$...$$（Obsidian 表格内公式渲染异常），单元格内的符号用纯文本或反引号代码，如 `I_feat` 而非 $I_{feat}$。
 - 每个表格各行列数必须一致（表头、分隔行、数据行的 | 数量相同）。
 - 标题层级只允许 ##（章节）与 ###（小节），不得使用 #、#### 及以上。
 

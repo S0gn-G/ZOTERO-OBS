@@ -13,6 +13,9 @@ PLACEHOLDER_MIN_HITS = 2
 MY_NOTES_HEADING = "## 我的笔记"
 QUESTIONS_HEADING = "## 疑问"
 
+# frontmatter 的 note_file 字段：写回时按实际文件名同步（用户改名后不残留假值）
+NOTE_FILE_RE = re.compile(r"^note_file:\s*.*$", re.M)
+
 
 # Windows 保留设备名：即使带扩展名也非法（CON.md / NUL.txt / COM1.pdf…）
 _WINDOWS_RESERVED = (
@@ -76,6 +79,28 @@ def merge_handwritten(old: str, new: str) -> str:
     if (old_qa or "").strip():
         parts += ["", (old_qa or "").strip()]
     return "\n".join(parts) + "\n"
+
+
+def _sync_note_file(content: str, actual_basename: str) -> str:
+    """把 frontmatter 里的 note_file 改为实际写入的文件名。
+
+    生成时 note_file 是 canonical stem.md；若用户改过名、写入路径不同，这里修正，避免
+    元数据与实际文件名不一致。与实际名一致时替换结果相同（无副作用）。"""
+    if NOTE_FILE_RE.search(content):
+        return NOTE_FILE_RE.sub(f'note_file: "{actual_basename}"', content, count=1)
+    return content
+
+
+class NotePathConflict(Exception):
+    """目标笔记文件被其他文献（或无 frontmatter 的人工文件）占用，拒绝覆盖。"""
+
+    def __init__(self, path: str, citation_key: str):
+        super().__init__(
+            f"笔记文件 {path} 被其他文献占用，拒绝覆盖（citekey {citation_key}）。"
+            "请检查或删除该文件后重试。"
+        )
+        self.path = path
+        self.citation_key = citation_key
 
 
 class ObsidianWriter:
@@ -165,10 +190,17 @@ class ObsidianWriter:
 
     @staticmethod
     def _atomic_write(path: str, content: str) -> None:
-        """先写临时文件再 os.replace，避免写一半崩溃留下截断文件。"""
+        """先写临时文件再 os.replace，避免写一半崩溃留下截断文件。写失败清理 tmp。"""
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(content)
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         os.replace(tmp, path)
 
     @staticmethod
@@ -187,43 +219,47 @@ class ObsidianWriter:
         self._atomic_write(path, content)
         return path
 
-    def write_note_preserving(self, citation_key: str, content: str, zotero_key: str | None = None) -> str:
-        """写笔记，保留旧笔记的「我的笔记/疑问」手写区。
+    def _resolve_write_path(self, citation_key: str, zotero_key: str | None = None) -> str:
+        """确定写入路径，归属校验 fail-closed。
 
-        目标文件（<safe citekey>-<zotero key>.md）存在且确属本文（frontmatter zotero_key
-        匹配）才继承手写区；若用户在 Obsidian 里改过名（规范路径不存在），则按 zotero_key
-        定位实际文件并写入该路径，避免第二份、也不丢手写内容。返回实际写入路径。"""
+        目标（<safe citekey>-<zotero key>.md）存在且属于本文 → 用目标；否则按 zotero_key
+        定位用户改过名的旧笔记；都没有且目标被他人（含无 frontmatter 的人工文件）占用 →
+        抛 NotePathConflict，绝不覆盖。"""
         target = self.note_path(citation_key, zotero_key)
-        old_path = None
         if os.path.exists(target):
             owner = self._zotero_key_of(target)
-            if owner is None or owner == (zotero_key or citation_key):
-                old_path = target
-        # 目标被他人占用（异常）或路径不存在 → 按 zotero_key 精确定位本文旧笔记
-        if old_path is None and zotero_key:
-            old_path = self._find_note_by_key(zotero_key)
+            if owner == (zotero_key or citation_key):
+                return target
+            if zotero_key:
+                renamed = self._find_note_by_key(zotero_key)
+                if renamed:
+                    return renamed
+            raise NotePathConflict(target, citation_key)
+        if zotero_key:
+            renamed = self._find_note_by_key(zotero_key)
+            if renamed:
+                return renamed
+        return target
+
+    def write_note_preserving(self, citation_key: str, content: str, zotero_key: str | None = None) -> str:
+        """写笔记，保留旧笔记的「我的笔记/疑问」手写区，frontmatter note_file 按实际文件名同步。
+
+        目标文件被其他文献/无 frontmatter 文件占用且无改名旧笔记时抛 NotePathConflict。"""
+        path = self._resolve_write_path(citation_key, zotero_key)
         old = ""
-        if old_path:
+        if os.path.exists(path):
             try:
-                with open(old_path, "r", encoding="utf-8") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     old = f.read()
             except OSError:
                 old = ""
-        merged = merge_handwritten(old, content)
-        if old_path:
-            os.makedirs(os.path.dirname(old_path), exist_ok=True)
-            self._atomic_write(old_path, merged)
-            return old_path
-        return self.write_note(citation_key, merged, zotero_key)
+        merged = merge_handwritten(old, _sync_note_file(content, os.path.basename(path)))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._atomic_write(path, merged)
+        return path
 
-    def import_images(self, citation_key: str, figures: list[dict], zotero_key: str | None = None) -> list[str]:
-        """事务式导入图表：全部先拷入 <dir>.tmp，全部成功才一次性并入正式目录。
-
-        任一图缺失/拷贝失败时清理 tmp、正式目录不变，返回缺失文件名列表；空 = 已成功提交。
-        这样失败生成不会留下「旧 Markdown + 新图」的污染。"""
-        if not figures:
-            return []
-        dest_dir = os.path.join(self.notes_dir, "images", self._stem(citation_key, zotero_key))
+    def _stage_images(self, dest_dir: str, figures: list[dict]) -> list[str]:
+        """把暂存图表全部拷入 <dest_dir>.tmp；任一缺失/失败清理 tmp 返回 missing（正式目录不动）。"""
         staging = dest_dir + ".tmp"
         if os.path.isdir(staging):
             shutil.rmtree(staging, ignore_errors=True)  # 清上次崩溃残留
@@ -241,8 +277,11 @@ class ObsidianWriter:
                 missing.append(name)
         if missing:
             shutil.rmtree(staging, ignore_errors=True)
-            return missing
-        # 全部成功：一次性切换（旧目录先移走，新目录就位；切换失败回滚旧目录）
+        return missing
+
+    @staticmethod
+    def _swap_images(dest_dir: str, staging: str) -> None:
+        """一次性切换图片目录：旧目录 → .old，tmp → 正式；切换失败回滚 .old，成功后删 .old。"""
         backup = dest_dir + ".old"
         if os.path.isdir(backup):
             shutil.rmtree(backup, ignore_errors=True)
@@ -256,4 +295,64 @@ class ObsidianWriter:
             raise
         if os.path.isdir(backup):
             shutil.rmtree(backup, ignore_errors=True)
+
+    def import_images(self, citation_key: str, figures: list[dict], zotero_key: str | None = None) -> list[str]:
+        """事务式导入图表（旧接口，供独立调用）：全部暂存成功才一次性并入正式目录。
+
+        返回缺失文件名列表；空 = 已提交。失败时正式目录不变。"""
+        if not figures:
+            return []
+        dest_dir = os.path.join(self.notes_dir, "images", self._stem(citation_key, zotero_key))
+        missing = self._stage_images(dest_dir, figures)
+        if missing:
+            return missing
+        self._swap_images(dest_dir, dest_dir + ".tmp")
+        return []
+
+    def commit_generation(self, citation_key: str, content: str, figures: list[dict],
+                          zotero_key: str | None = None) -> list[str]:
+        """Markdown 与图片作为整体事务交付：失败回滚到旧态，绝不产生「旧笔记 + 新图」。
+
+        1. 无图 → 仅写笔记（保留手写区），返回 []。
+        2. 全图先拷入 images/<stem>.tmp/；任一缺失 → 清理 tmp，返回缺失列表（什么都不提交）。
+        3. 归属校验定位目标（占用冲突抛 NotePathConflict）→ 原子写 Markdown（同步 note_file）。
+        4. 一次性切换图片目录（旧 → .old，tmp → 正式）。
+        任一步失败：恢复旧 Markdown（原不存在则删除新文件）、恢复旧图片目录、清理 tmp 后 raise。
+        返回缺失文件名列表（空 = 已提交）。"""
+        if not figures:
+            self.write_note_preserving(citation_key, content, zotero_key)
+            return []
+        dest_dir = os.path.join(self.notes_dir, "images", self._stem(citation_key, zotero_key))
+        missing = self._stage_images(dest_dir, figures)
+        if missing:
+            return missing
+
+        path = None
+        existed = False
+        old = ""
+        try:
+            path = self._resolve_write_path(citation_key, zotero_key)
+            if os.path.exists(path):
+                existed = True
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        old = f.read()
+                except OSError:
+                    old = ""
+            merged = merge_handwritten(old, _sync_note_file(content, os.path.basename(path)))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self._atomic_write(path, merged)  # Markdown 先落盘，再切图片
+            self._swap_images(dest_dir, dest_dir + ".tmp")
+        except Exception:
+            # 回滚：Markdown 恢复旧内容（原不存在则删新文件），图片恢复旧目录
+            if path is not None and os.path.exists(path):
+                if existed:
+                    self._atomic_write(path, old)
+                else:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            shutil.rmtree(dest_dir + ".tmp", ignore_errors=True)
+            raise
         return []

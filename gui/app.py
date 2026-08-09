@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import customtkinter as ctk
+from tkinter import messagebox
 
 from config import load_config, save_config, CONFIG_PATH, resource_path
 from obsidian_writer import ObsidianWriter
@@ -134,14 +135,25 @@ class App(ctk.CTk):
         self.rows: dict[str, PaperRow] = {}
         self.writer = ObsidianWriter(self.cfg["vault_path"], self.cfg["notes_folder"])
         self._busy = False
+        self._generating = False
+        self._destroyed = False
         self.generate_btn = None
         self.settings_btn = None
         self._ui_queue = queue.Queue()
 
         self._set_window_icon()
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(200, self.refresh)
         self.after(50, self._poll_ui_queue)
+
+    def _on_close(self):
+        """生成中拦截关闭：防 daemon 线程被杀导致「图片已换/笔记未换」等事务悬空。"""
+        if self._generating:
+            messagebox.showinfo("正在生成", "笔记生成任务进行中，请等待完成后再关闭窗口。")
+            return
+        self._destroyed = True
+        self.destroy()
 
     def _set_window_icon(self):
         ico = resource_path("icon.ico")
@@ -157,6 +169,8 @@ class App(ctk.CTk):
         self._ui_queue.put(fn)
 
     def _poll_ui_queue(self):
+        if self._destroyed:
+            return  # 窗口已关闭：不再调度 after，避免对已销毁控件操作
         try:
             while True:
                 fn = self._ui_queue.get_nowait()
@@ -327,19 +341,19 @@ class App(ctk.CTk):
         cfg = dict(self.cfg)  # 快照：生成期间改设置不影响本次
         self._set_busy(True)
         row.set_generating(True)
+        self._generating = True
         threading.Thread(target=self._generate_one_worker, args=(row, cfg), daemon=True).start()
 
     def _run_generate(self, row, writer, cfg):
-        """生成单篇：LLM 管道 → 先拷图表（缺图判失败）→ 写笔记（保留手写区）→ 清暂存。返回 (ok, status, msg)。"""
+        """生成单篇：LLM 管道 → commit_generation 整体事务（笔记+图表一起提交，失败回滚）→ 清暂存。返回 (ok, status, msg)。"""
         figures = []
         try:
             result = generate_note(row.paper, cfg, note_key=row.note_key)
             figures = result["figures"]
-            if figures:
-                missing = writer.import_images(row.note_key, figures, zotero_key=row.paper["key"])
-                if missing:
-                    return False, "failed", f"图表拷贝失败：{', '.join(missing)}"
-            writer.write_note_preserving(row.note_key, result["content"], zotero_key=row.paper["key"])
+            missing = writer.commit_generation(
+                row.note_key, result["content"], figures, zotero_key=row.paper["key"])
+            if missing:
+                return False, "failed", f"图表拷贝失败：{', '.join(missing)}"
             return True, result["status"], "OK"
         except Exception as e:
             return False, "failed", str(e)
@@ -366,6 +380,7 @@ class App(ctk.CTk):
             row.mark_failed()
             self._set_status(f"生成失败：{err}")
         self._refresh_info()
+        self._generating = False
         self._set_busy(False)
 
     # ---------- 批量生成 ----------
@@ -389,6 +404,7 @@ class App(ctk.CTk):
         self._set_status(f"正在生成 {len(to_process)} 篇（跳过 {len(skips)} 篇已有笔记）…")
         self.progress.set(0)
         self._set_busy(True)
+        self._generating = True
         threading.Thread(
             target=self._generate_worker,
             args=(to_process, skips, cfg),
@@ -431,6 +447,7 @@ class App(ctk.CTk):
             elif r != "跳过（已有笔记）":
                 row.mark_failed()
         self._refresh_info()
+        self._generating = False
         self._set_busy(False)
         self.progress.set(1.0)
         suffix = ""

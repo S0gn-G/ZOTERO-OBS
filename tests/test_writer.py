@@ -1,7 +1,13 @@
-"""ObsidianWriter 单元测试：safe_citekey / 笔记读写 / 改名定位 / 图表拷贝 / 状态扫描。"""
+"""ObsidianWriter 单元测试：safe_citekey / 笔记读写 / 改名定位 / 归属冲突 / 整体事务 / 图表拷贝 / 状态扫描。"""
 import os
 
-from obsidian_writer import ObsidianWriter, safe_citekey, merge_handwritten
+import pytest
+
+from obsidian_writer import ObsidianWriter, NotePathConflict, safe_citekey, merge_handwritten
+
+
+def _fig(name, src):
+    return {"name": name, "staging_path": str(src)}
 
 
 def test_safe_citekey_rejects_traversal():
@@ -169,3 +175,158 @@ def test_scan_states_placeholder_in_llm_body(tmp_path):
         f.write(content)
     states = {k: s for k, s, _m in w.scan_states()}
     assert states["K1"] == "placeholder"
+
+
+# ---------- NotePathConflict：归属冲突 fail-closed ----------
+
+def test_owner_mismatch_raises_conflict(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    target = tmp_path / "Notes" / "A_B-K1.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("---\nzotero_key: \"OTHER\"\n---\n\n# Other\n", encoding="utf-8")
+    with pytest.raises(NotePathConflict):
+        w.write_note_preserving("A B", "---\nzotero_key: \"K1\"\n---\n\n# New\n", zotero_key="K1")
+    assert target.read_text(encoding="utf-8") == "---\nzotero_key: \"OTHER\"\n---\n\n# Other\n"
+
+
+def test_no_frontmatter_raises_conflict(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    target = tmp_path / "Notes" / "A_B-K1.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# 人工笔记，无 frontmatter\n", encoding="utf-8")
+    with pytest.raises(NotePathConflict):
+        w.write_note_preserving("A B", "---\nzotero_key: \"K1\"\n---\n\n# New\n", zotero_key="K1")
+    assert target.read_text(encoding="utf-8") == "# 人工笔记，无 frontmatter\n"
+
+
+def test_owner_mismatch_but_renamed_exists_writes_renamed(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    os.makedirs(w.notes_dir, exist_ok=True)
+    renamed = os.path.join(w.notes_dir, "custom-name.md")
+    with open(renamed, "w", encoding="utf-8") as f:
+        f.write("---\nzotero_key: \"K1\"\n---\n\n# Old\n")
+    target = tmp_path / "Notes" / "A_B-K1.md"
+    target.write_text("---\nzotero_key: \"OTHER\"\n---\n\n# Other\n", encoding="utf-8")
+    written = w.write_note_preserving("A B", "---\nzotero_key: \"K1\"\n---\n\n# New\n", zotero_key="K1")
+    assert written == renamed  # 写改名旧笔记，不碰他人占用文件
+    assert target.read_text(encoding="utf-8") == "---\nzotero_key: \"OTHER\"\n---\n\n# Other\n"
+
+
+def test_owner_match_preserves_handwritten(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    target = tmp_path / "Notes" / "A_B-K1.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("---\nzotero_key: \"K1\"\n---\n\n# Old\n\n## 我的笔记\n\n手写内容\n\n## 疑问\n", encoding="utf-8")
+    new = "---\nzotero_key: \"K1\"\n---\n\n# New\n\n## 我的笔记\n\n\n## 疑问\n"
+    w.write_note_preserving("A B", new, zotero_key="K1")
+    assert "手写内容" in target.read_text(encoding="utf-8")
+
+
+def test_note_file_synced_to_renamed_basename(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    os.makedirs(w.notes_dir, exist_ok=True)
+    renamed = os.path.join(w.notes_dir, "custom-name.md")
+    with open(renamed, "w", encoding="utf-8") as f:
+        f.write("---\nzotero_key: \"K1\"\nnote_file: \"old.md\"\n---\n\n# Old\n")
+    new_content = "---\nzotero_key: \"K1\"\nnote_file: \"cite2022-K1.md\"\n---\n\n# New\n"
+    written = w.write_note_preserving("cite2022", new_content, zotero_key="K1")
+    assert written == renamed
+    with open(renamed, encoding="utf-8") as f:
+        out = f.read()
+    assert 'note_file: "custom-name.md"' in out
+    assert 'note_file: "cite2022-K1.md"' not in out
+
+
+# ---------- commit_generation：整体事务 ----------
+
+def test_commit_generation_success_commits_both(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    src = tmp_path / "fig_1.png"
+    src.write_bytes(b"NEW")
+    figs = [_fig("fig_1.png", src)]
+    assert w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n", figs, zotero_key="K1") == []
+    assert (tmp_path / "Notes" / "cite-K1.md").exists()
+    assert (tmp_path / "Notes" / "images" / "cite-K1" / "fig_1.png").read_bytes() == b"NEW"
+    assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
+    assert not (tmp_path / "Notes" / "images" / "cite-K1.old").exists()
+
+
+def test_commit_generation_no_figures_writes_note_only(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    assert w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n", [], zotero_key="K1") == []
+    assert (tmp_path / "Notes" / "cite-K1.md").exists()
+    assert not (tmp_path / "Notes" / "images").exists()
+
+
+def test_commit_generation_missing_fig_no_commit(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    figs = [_fig("fig_1.png", str(tmp_path / "missing.png"))]
+    assert w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n", figs, zotero_key="K1") == ["fig_1.png"]
+    assert not (tmp_path / "Notes" / "cite-K1.md").exists()
+    assert not (tmp_path / "Notes" / "images" / "cite-K1").exists()
+
+
+def test_commit_generation_owner_conflict_raises(tmp_path):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    md = tmp_path / "Notes" / "cite-K1.md"
+    md.parent.mkdir(parents=True)
+    md.write_text("---\nzotero_key: \"OTHER\"\n---\n\n# Other\n", encoding="utf-8")
+    src = tmp_path / "fig_1.png"
+    src.write_bytes(b"NEW")
+    with pytest.raises(NotePathConflict):
+        w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n", [_fig("fig_1.png", src)], zotero_key="K1")
+    assert md.read_text(encoding="utf-8") == "---\nzotero_key: \"OTHER\"\n---\n\n# Other\n"
+    assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
+
+
+def test_commit_generation_markdown_write_failure_rolls_back(tmp_path, monkeypatch):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    dest = tmp_path / "Notes" / "images" / "cite-K1"
+    dest.mkdir(parents=True)
+    (dest / "fig_1.png").write_bytes(b"OLD")
+    md = tmp_path / "Notes" / "cite-K1.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text("---\nzotero_key: \"K1\"\n---\n\n# Old\n\n## 我的笔记\n\n手写内容\n\n## 疑问\n", encoding="utf-8")
+    orig = ObsidianWriter._atomic_write  # staticmethod，类访问即底层函数
+    calls = {"n": 0}
+
+    def flaky(path, content):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return orig(path, content)
+
+    monkeypatch.setattr(ObsidianWriter, "_atomic_write", staticmethod(flaky))
+    src = tmp_path / "fig_1.png"
+    src.write_bytes(b"NEW")
+    with pytest.raises(OSError):
+        w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n\n新正文\n", [_fig("fig_1.png", src)], zotero_key="K1")
+    content = md.read_text(encoding="utf-8")
+    assert "手写内容" in content  # 回滚到旧笔记（含手写），不是「旧笔记 + 新图」
+    assert "新正文" not in content
+    assert (dest / "fig_1.png").read_bytes() == b"OLD"
+    assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
+
+
+def test_commit_generation_image_swap_failure_rolls_back(tmp_path, monkeypatch):
+    w = ObsidianWriter(str(tmp_path), "Notes")
+    dest = tmp_path / "Notes" / "images" / "cite-K1"
+    dest.mkdir(parents=True)
+    (dest / "fig_1.png").write_bytes(b"OLD")
+    md = tmp_path / "Notes" / "cite-K1.md"
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text("---\nzotero_key: \"K1\"\n---\n\n# Old\n\n## 我的笔记\n\n手写内容\n\n## 疑问\n", encoding="utf-8")
+
+    def boom(dest_dir, staging):
+        raise RuntimeError("swap failed")
+
+    monkeypatch.setattr(ObsidianWriter, "_swap_images", staticmethod(boom))
+    src = tmp_path / "fig_1.png"
+    src.write_bytes(b"NEW")
+    with pytest.raises(RuntimeError):
+        w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n\n新正文\n", [_fig("fig_1.png", src)], zotero_key="K1")
+    content = md.read_text(encoding="utf-8")
+    assert "手写内容" in content  # markdown 回滚旧内容
+    assert "新正文" not in content
+    assert (dest / "fig_1.png").read_bytes() == b"OLD"  # 图片未切换
+    assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
