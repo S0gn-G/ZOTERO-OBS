@@ -58,27 +58,28 @@ class ZoteroClient:
             start += PAGE_SIZE
             if start >= total or len(page) < PAGE_SIZE or start >= MAX_ITEMS:
                 break
-        by_key = {i["key"]: i for i in items}
+        # 一次性建 PDF 附件索引（parentItem -> attachment），后续每篇 O(1) 定位，
+        # 避免每篇都遍历全库（O(N²)）。
+        att_by_parent: dict[str, dict] = {}
+        for it in items:
+            d = it.get("data", {})
+            if (
+                d.get("itemType") == "attachment"
+                and d.get("contentType") == "application/pdf"
+                and d.get("parentItem")
+            ):
+                att_by_parent.setdefault(d["parentItem"], it)
         papers = []
         for it in items:
             d = it.get("data", {})
             if d.get("itemType") in ("attachment", "annotation", "note"):
                 continue
-            papers.append(self._to_paper(it, by_key))
+            papers.append(self._to_paper(it, att_by_parent))
         return papers
 
     @staticmethod
-    def _find_pdf(it, by_key) -> dict | None:
-        key = it["key"]
-        for child in by_key.values():
-            cd = child.get("data", {})
-            if (
-                cd.get("itemType") == "attachment"
-                and cd.get("parentItem") == key
-                and cd.get("contentType") == "application/pdf"
-            ):
-                return child
-        return None
+    def _find_pdf(it, att_by_parent) -> dict | None:
+        return att_by_parent.get(it["key"])
 
     @staticmethod
     def _pdf_path(att) -> str | None:
@@ -92,7 +93,7 @@ class ZoteroClient:
             return url2pathname(urllib.parse.unquote(parsed.path))
         return None
 
-    def _to_paper(self, it, by_key) -> dict:
+    def _to_paper(self, it, att_by_parent) -> dict:
         d = it.get("data", {})
         creators = d.get("creators", []) or []
         authors = [
@@ -102,7 +103,7 @@ class ZoteroClient:
             for c in creators
             if c.get("lastName") or c.get("firstName")
         ]
-        att = self._find_pdf(it, by_key)
+        att = self._find_pdf(it, att_by_parent)
         return {
             "key": it["key"],
             "itemType": d.get("itemType", ""),

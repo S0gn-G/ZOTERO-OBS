@@ -41,6 +41,14 @@ class SettingsWindow(ctk.CTkToplevel):
         self._entry(body, "llm_api_key", "API Key", cfg["llm_api_key"], width=430, show="*")
         self._entry(body, "llm_model", "模型名", cfg["llm_model"], width=430)
 
+        ctk.CTkLabel(
+            body, text="领域画像（空=默认 SR/ReID 研究员；可改成你的领域描述，如：你是一名计算机视觉研究员）",
+            text_color="gray", justify="left", anchor="w", font=ctk.CTkFont(size=11),
+        ).pack(anchor="w", pady=(8, 2))
+        self.profile_box = ctk.CTkTextbox(body, height=52, wrap="word")
+        self.profile_box.pack(fill="x", pady=(0, 8))
+        self.profile_box.insert("1.0", cfg.get("llm_profile") or "")
+
         self.llm_var = ctk.BooleanVar(value=cfg.get("llm_enabled", True))
         ctk.CTkCheckBox(body, text="启用 LLM 生成深度笔记", variable=self.llm_var).pack(anchor="w", pady=(0, 8))
 
@@ -95,6 +103,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.cfg["overwrite"] = self.overwrite_var.get()
         self.cfg["only_with_pdf"] = self.pdf_var.get()
         self.cfg["use_pdf_text"] = self.pdftext_var.get()
+        self.cfg["llm_profile"] = self.profile_box.get("1.0", "end").strip()
         save_config(self.cfg)
         if self.on_saved:
             self.on_saved(self.cfg)

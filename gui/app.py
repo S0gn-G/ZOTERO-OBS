@@ -23,9 +23,9 @@ GRAY = "#7E8780"
 RED = "#B4472F"
 AMBER = "#B07A2A"
 
-# 笔记状态：ok=已生成 / needs_source=证据不足待原文 / placeholder=正文含占位符需修复 / none=未生成
-NOTE_STATE_LABEL = {"ok": "已生成", "needs_source": "需原文", "placeholder": "需修复", "none": "未生成"}
-NOTE_STATE_COLOR = {"ok": GREEN, "needs_source": AMBER, "placeholder": RED, "none": GRAY}
+# 笔记状态：ok=已生成 / needs_source=证据不足待原文 / abstract_only=仅摘要 / placeholder=正文含占位符需修复 / none=未生成
+NOTE_STATE_LABEL = {"ok": "已生成", "needs_source": "需原文", "abstract_only": "仅摘要", "placeholder": "需修复", "none": "未生成"}
+NOTE_STATE_COLOR = {"ok": GREEN, "needs_source": AMBER, "abstract_only": AMBER, "placeholder": RED, "none": GRAY}
 
 
 def _fmt_mtime(ts: float) -> str:
@@ -71,7 +71,7 @@ class PaperRow:
                 command=lambda: on_open_pdf(paper["key"]),
             ).pack(side="right", padx=(0, 6), pady=12)
 
-        suffix = {"ok": "  ✔", "needs_source": "  ⚠", "placeholder": "  ✗"}.get(note_state, "")
+        suffix = {"ok": "  ✔", "needs_source": "  ⚠", "abstract_only": "  ⚠", "placeholder": "  ✗"}.get(note_state, "")
         title = paper["title"] + suffix
         ctk.CTkLabel(self.frame, text=title, anchor="w", justify="left",
                      font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold")).pack(
@@ -103,6 +103,11 @@ class PaperRow:
         self.status.configure(text="需原文", fg_color=AMBER)
         self.set_updated_at(_fmt_mtime(time.time()))
 
+    def mark_abstract_only(self):
+        self.note_state = "abstract_only"
+        self.status.configure(text="仅摘要", fg_color=AMBER)
+        self.set_updated_at(_fmt_mtime(time.time()))
+
     def set_generating(self, on: bool):
         if on:
             self.generate_btn.configure(state="disabled", text="生成中…")
@@ -130,6 +135,7 @@ class App(ctk.CTk):
         self.writer = ObsidianWriter(self.cfg["vault_path"], self.cfg["notes_folder"])
         self._busy = False
         self.generate_btn = None
+        self.settings_btn = None
         self._ui_queue = queue.Queue()
 
         self._set_window_icon()
@@ -163,8 +169,9 @@ class App(ctk.CTk):
     def _build_ui(self):
         top = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         top.pack(fill="x", padx=14, pady=(12, 6))
-        ctk.CTkButton(top, text="设置", width=92, height=32, image=icons.settings(),
-                      command=self.open_settings).pack(side="left", padx=(0, 6))
+        self.settings_btn = ctk.CTkButton(top, text="设置", width=92, height=32, image=icons.settings(),
+                                          command=self.open_settings)
+        self.settings_btn.pack(side="left", padx=(0, 6))
         ctk.CTkButton(top, text="模板", width=92, height=32, image=icons.template(),
                       command=self.open_template).pack(side="left", padx=6)
         ctk.CTkButton(top, text="刷新", width=92, height=32, image=icons.refresh(),
@@ -208,6 +215,8 @@ class App(ctk.CTk):
             row.generate_btn.configure(state=state)
         if self.generate_btn:
             self.generate_btn.configure(state=state)
+        if self.settings_btn:
+            self.settings_btn.configure(state=state)
 
     def _refresh_info(self, states=None):
         """更新顶部信息行。传 states 则复用（刷新路径），否则重扫一次（生成后计数）。"""
@@ -216,7 +225,10 @@ class App(ctk.CTk):
         done = sum(1 for _k, s, _m in states if s == "ok")
         need = sum(1 for _k, s, _m in states if s == "insufficient")
         bad = sum(1 for _k, s, _m in states if s == "placeholder")
+        abstract = sum(1 for _k, s, _m in states if s == "abstract_only")
         info = f"{len(self.papers)} 篇文献 · {done} 篇已生成"
+        if abstract:
+            info += f" · {abstract} 篇仅摘要"
         if bad:
             info += f" · {bad} 篇需修复"
         if need:
@@ -258,6 +270,7 @@ class App(ctk.CTk):
         note_keys = {k for k, _s, _m in states}
         insufficient = {k for k, s, _m in states if s == "insufficient"}
         placeholders = {k for k, s, _m in states if s == "placeholder"}
+        abstract = {k for k, s, _m in states if s == "abstract_only"}
         mtimes = {k: m for k, _s, m in states}
         if not papers:
             ctk.CTkLabel(
@@ -275,6 +288,8 @@ class App(ctk.CTk):
                 state = "placeholder"
             elif p["key"] in insufficient:
                 state = "needs_source"
+            elif p["key"] in abstract:
+                state = "abstract_only"
             elif p["key"] in note_keys:
                 state = "ok"
             else:
@@ -300,29 +315,40 @@ class App(ctk.CTk):
         row = self.rows.get(key)
         if not row:
             return
+        if not self.cfg["vault_path"]:
+            self._set_status("请先在 设置 里填写 Obsidian Vault 路径")
+            return
         if row.note_state == "ok" and not self.cfg["overwrite"]:
             self._set_status("该篇已有笔记，如需覆盖请在 设置 中开启「覆盖已生成的笔记」")
             return
         if self.cfg["llm_enabled"] and not self.cfg["llm_api_key"]:
             self._set_status("LLM 已启用但未填 API Key（在 设置 里填写，或关闭 LLM）")
             return
+        cfg = dict(self.cfg)  # 快照：生成期间改设置不影响本次
         self._set_busy(True)
         row.set_generating(True)
-        threading.Thread(target=self._generate_one_worker, args=(row,), daemon=True).start()
+        threading.Thread(target=self._generate_one_worker, args=(row, cfg), daemon=True).start()
 
-    def _run_generate(self, row, writer):
-        """生成单篇笔记：generate_note → 写笔记（保留手写区）→ 拷图表 → 清暂存。返回 (ok, status, msg)。"""
+    def _run_generate(self, row, writer, cfg):
+        """生成单篇：LLM 管道 → 先拷图表（缺图判失败）→ 写笔记（保留手写区）→ 清暂存。返回 (ok, status, msg)。"""
+        figures = []
         try:
-            result = generate_note(row.paper, self.cfg, note_key=row.note_key)
-            writer.write_note_preserving(row.note_key, result["content"])
-            writer.import_images(row.note_key, result["figures"])
-            cleanup_figures(result["figures"])
+            result = generate_note(row.paper, cfg, note_key=row.note_key)
+            figures = result["figures"]
+            if figures:
+                missing = writer.import_images(row.note_key, figures)
+                if missing:
+                    return False, "failed", f"图表拷贝失败：{', '.join(missing)}"
+            writer.write_note_preserving(row.note_key, result["content"], zotero_key=row.paper["key"])
             return True, result["status"], "OK"
         except Exception as e:
             return False, "failed", str(e)
+        finally:
+            if figures:
+                cleanup_figures(figures)
 
-    def _generate_one_worker(self, row):
-        ok, status, err = self._run_generate(row, self.writer)
+    def _generate_one_worker(self, row, cfg):
+        ok, status, err = self._run_generate(row, self.writer, cfg)
         self._post(lambda: self._finish_one(row, ok, status, err))
 
     def _finish_one(self, row, ok, status, err):
@@ -330,6 +356,9 @@ class App(ctk.CTk):
         if ok and status == "needs_source":
             row.mark_needs_source()
             self._set_status(f"已生成骨架（证据不足）：{row.paper['title'][:40]}")
+        elif ok and status == "abstract_only":
+            row.mark_abstract_only()
+            self._set_status(f"已生成（仅摘要）：{row.paper['title'][:40]}")
         elif ok:
             row.mark_done()
             self._set_status(f"已生成：{row.paper['title'][:40]}")
@@ -347,10 +376,14 @@ class App(ctk.CTk):
         if not selected:
             self._set_status("请先勾选至少一篇文献")
             return
+        if not self.cfg["vault_path"]:
+            self._set_status("请先在 设置 里填写 Obsidian Vault 路径")
+            return
         if self.cfg["llm_enabled"] and not self.cfg["llm_api_key"]:
             self._set_status("LLM 已启用但未填 API Key（在 设置 里填写，或关闭 LLM）")
             return
-        overwrite = self.cfg["overwrite"]
+        cfg = dict(self.cfg)  # 快照：批量生成期间改设置不影响本次
+        overwrite = cfg["overwrite"]
         to_process = [r for r in selected if overwrite or r.note_state != "ok"]
         skips = [r for r in selected if r.note_state == "ok" and not overwrite]
         self._set_status(f"正在生成 {len(to_process)} 篇（跳过 {len(skips)} 篇已有笔记）…")
@@ -358,12 +391,12 @@ class App(ctk.CTk):
         self._set_busy(True)
         threading.Thread(
             target=self._generate_worker,
-            args=(to_process, skips),
+            args=(to_process, skips, cfg),
             daemon=True,
         ).start()
 
-    def _generate_worker(self, rows, skips):
-        writer = ObsidianWriter(self.cfg["vault_path"], self.cfg["notes_folder"])
+    def _generate_worker(self, rows, skips, cfg):
+        writer = ObsidianWriter(cfg["vault_path"], cfg["notes_folder"])
         total = len(rows)
         results = [(r.paper["key"], "ok", "跳过（已有笔记）") for r in skips]
         if not rows:
@@ -371,7 +404,7 @@ class App(ctk.CTk):
             return
         done = 0
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            future_to_row = {pool.submit(self._run_generate, r, writer): r for r in rows}
+            future_to_row = {pool.submit(self._run_generate, r, writer, cfg): r for r in rows}
             for fut in as_completed(future_to_row):
                 row = future_to_row[fut]
                 ok, status, msg = fut.result()
@@ -384,6 +417,7 @@ class App(ctk.CTk):
     def _finish_generate(self, results):
         ok = sum(1 for _, s, r in results if s == "ok" and r == "OK")
         need = sum(1 for _, s, r in results if s == "needs_source")
+        abstract = sum(1 for _, s, r in results if s == "abstract_only")
         for key, s, r in results:
             row = self.rows.get(key)
             if not row:
@@ -392,12 +426,18 @@ class App(ctk.CTk):
                 row.mark_done()
             elif s == "needs_source":
                 row.mark_needs_source()
+            elif s == "abstract_only":
+                row.mark_abstract_only()
             elif r != "跳过（已有笔记）":
                 row.mark_failed()
         self._refresh_info()
         self._set_busy(False)
         self.progress.set(1.0)
-        suffix = f"，{need} 篇需原文" if need else ""
+        suffix = ""
+        if need:
+            suffix += f"，{need} 篇需原文"
+        if abstract:
+            suffix += f"，{abstract} 篇仅摘要"
         self._set_status(f"完成：成功 {ok}/{len(results)}{suffix}")
 
     # ---------- PDF ----------

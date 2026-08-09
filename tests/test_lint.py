@@ -1,0 +1,45 @@
+"""lint_note 单元测试：表格 / 标题 / 必需章节 / 占位符 / 图表引用。"""
+from note_generator import lint_note, _check_table_block, _heading_issues
+
+
+def test_table_cell_formula_issue():
+    issues = _check_table_block(["| a | b |", "| --- | --- |", "| 1 | 2 $x$ |"])
+    assert any("行内公式" in i for i in issues)
+
+
+def test_table_column_count_issue():
+    issues = _check_table_block(["| a | b |", "| --- | --- |", "| 1 |"])
+    assert any("列数" in i for i in issues)
+
+
+def test_table_valid_block_no_issue():
+    assert _check_table_block(["| a | b |", "| --- | --- |", "| 1 | 2 |"]) == []
+
+
+def test_heading_only_h2_h3():
+    issues = _heading_issues("# Big\n## Sec\n### Sub\n#### Deep\n")
+    assert len(issues) == 2  # # 与 #### 各报一条
+
+
+def test_lint_required_sections():
+    issues = lint_note("## 核心信息\n", {"paper_type": "benchmark"}, [], "k")
+    assert any("缺少必需章节 ## 原文摘要翻译" in i for i in issues)
+
+
+def test_lint_method_requires_flow():
+    body = "## 核心信息\n## 原文摘要翻译\n## 创新点\n## 一句话总结\n## 方法主线\n"
+    issues = lint_note(body, {"paper_type": "method"}, [], "k")
+    assert any("### 机制流程" in i for i in issues)
+
+
+def test_lint_placeholder_hits():
+    body = "## 核心信息\n## 原文摘要翻译\n## 创新点\n## 一句话总结\n待补充 待补充\n"
+    issues = lint_note(body, {"paper_type": "benchmark"}, [], "k")
+    assert any("占位符" in i for i in issues)
+
+
+def test_lint_figure_ref_check():
+    body = "## 核心信息\n## 原文摘要翻译\n## 创新点\n## 一句话总结\n![图](images/k/fig_1.png)\n"
+    figures = [{"name": "fig_2.png"}]
+    issues = lint_note(body, {"paper_type": "benchmark"}, figures, "k")
+    assert any("不存在的文件" in i for i in issues)

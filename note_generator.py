@@ -21,6 +21,7 @@ import tempfile
 from openai import OpenAI
 
 from config import BASE_DIR
+from obsidian_writer import safe_citekey
 
 PDF_MAX_CHARS = 30000  # 深度笔记需要更多证据
 
@@ -48,35 +49,52 @@ def _extract_pdf_text(pdf_path: str, max_chars: int = PDF_MAX_CHARS) -> str:
 # ---------------- 图表提取（Stage 2） ----------------
 
 
-FIGURE_CAPTION_RE = re.compile(r"(?im)^\s*(?:Figure|Fig\.?)\s+(\d+)[.:]\s*(.*)$")
+# 图注识别：Figure/Fig. 与 Table/Tab.，捕获类型与编号
+CAPTION_RE = re.compile(r"(?im)^\s*(?:(Figure|Fig\.?)|(Table|Tab\.?))\s+(\d+)[.:]\s*(.*)$")
 MIN_FIG_H = 60     # 渲染区域最小高度（像素，过滤装饰性图注）
 FIG_SCALE = 2.0    # 渲染缩放
 
 
 def _page_captions(doc, page_no: int) -> list[dict]:
-    """返回指定页上所有图注：[{num, y0, y1, x0, x1, text}]。"""
+    """返回指定页上所有图注：[{kind, num, y0, y1, x0, x1, text}]。kind ∈ fig/table。"""
     page = doc[page_no - 1]
     caps: list[dict] = []
     for block in page.get_text("dict")["blocks"]:
         if "lines" not in block:
             continue
-        text = "".join(s["text"] for s in block["lines"][0]["spans"]).strip()
-        m = FIGURE_CAPTION_RE.match(text)
+        # 多行图注：拼接整个 block 的文本，仍以 block 首行做匹配判定
+        text = " ".join(
+            "".join(s["text"] for s in ln["spans"]) for ln in block["lines"]
+        ).strip()
+        m = CAPTION_RE.match(text)
         if not m:
             continue
+        kind = "table" if m.group(2) else "fig"
         x0, y0, x1, y1 = block["bbox"]
-        caps.append({"num": int(m.group(1)), "y0": y0, "y1": y1, "x0": x0, "x1": x1, "text": text})
+        caps.append({"kind": kind, "num": int(m.group(3)), "y0": y0, "y1": y1,
+                     "x0": x0, "x1": x1, "text": text})
     caps.sort(key=lambda c: c["y0"])
     return caps
+
+
+def _image_rects(page) -> list:
+    """页面内嵌图片的矩形列表（用于图注上方纵向向上探图）。渲染异常时返回空。"""
+    try:
+        rects: list = []
+        for img in page.get_images(full=True):
+            rects.extend(page.get_image_rects(img[0]))
+        return rects
+    except Exception:
+        return []
 
 
 def _extract_figures(pdf_path: str, note_key: str) -> list[dict]:
     """按图注定位并渲染 PDF 中的图表区域（能抓住矢量 pipeline/架构图）。
 
-    对每页：找到所有 "Figure N / Fig. N" 图注，渲染从上一个图注底边到当前
-    图注顶边之间的区域；页首的图渲染到页边距。暂存到临时目录。
-
-    返回 [{name, page, caption, staging_path}]。无图注的页不提取。
+    对每页：找到所有 "Figure N / Fig. N / Table N / Tab. N" 图注，渲染从上一个
+    图注底边到当前图注顶边之间的区域；页首的图渲染到页边距。横向放宽到正文整页
+    宽度（图注通常比图本身窄，不能按图注宽度裁剪），纵向用页面内嵌图片区域上探。
+    暂存到临时目录。返回 [{name, page, caption, staging_path}]。无图注的页不提取。
     """
     if not pdf_path or not os.path.exists(pdf_path):
         return []
@@ -84,7 +102,7 @@ def _extract_figures(pdf_path: str, note_key: str) -> list[dict]:
         import fitz  # PyMuPDF
     except ImportError:
         return []
-    staging = tempfile.mkdtemp(prefix=f"zotnotes_fig_{note_key}_")
+    staging = tempfile.mkdtemp(prefix=f"zotnotes_fig_{safe_citekey(note_key)}_")
     figs: list[dict] = []
     doc = None
     try:
@@ -97,18 +115,23 @@ def _extract_figures(pdf_path: str, note_key: str) -> list[dict]:
             margin_top = 55.0   # 页边距上界
             margin_left = 45.0
             page_w = page.rect.width
+            image_rects = _image_rects(page)
             prev_bottom = margin_top
             for cap in caps:
-                # 渲染区域：上一个图注底边 ~ 当前图注顶边
-                x0 = max(margin_left, cap["x0"] - 20)
-                x1 = min(page_w - margin_left, max(cap["x1"] + 20, margin_left + 300))
-                y0 = max(prev_bottom, cap["y0"] - 320)  # 向上最多留 320pt
+                # 横向放宽到正文整页宽度
+                x0 = margin_left
+                x1 = max(page_w - margin_left, margin_left + 100)
+                # 纵向：图注上方、横向重叠的内嵌图片区域，上探到其顶边；无则 320pt 兜底
+                y0 = max(prev_bottom, cap["y0"] - 320)
+                for r in image_rects:
+                    if r.y1 >= cap["y0"] - 4 and r.y0 < cap["y0"] and r.x1 > x0 and r.x0 < x1:
+                        y0 = min(y0, r.y0)
                 y1 = cap["y0"] - 4
                 if y1 - y0 < MIN_FIG_H:
                     prev_bottom = cap["y1"]
                     continue
                 clip = fitz.Rect(x0, y0, x1, y1)
-                name = f"fig_{cap['num']}_p{pno}.png"
+                name = f"{cap['kind']}_{cap['num']}_p{pno}.png"
                 path = os.path.join(staging, name)
                 try:
                     pix = page.get_pixmap(matrix=fitz.Matrix(FIG_SCALE, FIG_SCALE), clip=clip)
@@ -226,6 +249,16 @@ def _substitute(template: str, paper: dict, llm_body: str, note_file: str) -> st
     return out
 
 
+def _add_evidence_line(content: str, value: str) -> str:
+    """在 frontmatter 块末尾（闭合 --- 前）插入 evidence 行。"""
+    if not content.startswith("---"):
+        return content
+    end = content.find("\n---", 3)
+    if end == -1:
+        return content
+    return content[:end] + f"\nevidence: {value}" + content[end:]
+
+
 # ---------------- 证据包（Stage 3） ----------------
 
 
@@ -260,7 +293,16 @@ def _client(cfg: dict) -> OpenAI:
     )
 
 
-PLAN_SYSTEM = """你是一名图像超分辨率（SR）与行人重识别（ReID）领域的资深研究员。
+# 领域画像：config 里 llm_profile 可覆盖（空则用默认 SR/ReID 画像），
+# 使工具可服务任意研究领域，而不是写死某两个子方向。
+DEFAULT_DOMAIN_PROFILE = "你是一名图像超分辨率（SR）与行人重识别（ReID）领域的资深研究员"
+
+
+def _domain_profile(cfg: dict) -> str:
+    return (cfg.get("llm_profile") or "").strip() or DEFAULT_DOMAIN_PROFILE
+
+
+PLAN_SYSTEM_TMPL = """{profile}。
 给定一篇论文的证据包（元数据、摘要、正文摘录、图表清单），先输出一个结构化 JSON 写作计划，
 供后续生成深度精读笔记。只输出 JSON，不要任何前后缀或解释。
 
@@ -287,6 +329,10 @@ JSON 结构：
 - key_formulas 仅当方法涉及目标函数、更新规则、复杂度表达式时才填。"""
 
 
+def PLAN_SYSTEM(cfg: dict) -> str:
+    return PLAN_SYSTEM_TMPL.format(profile=_domain_profile(cfg))
+
+
 def _plan_user(bundle: dict) -> str:
     return (
         "论文证据包（JSON）：\n" + json.dumps(bundle, ensure_ascii=False)
@@ -303,33 +349,56 @@ def _extract_json(text: str) -> str:
     return t[start:end + 1]
 
 
+ALLOWED_PAPER_TYPES = {"method", "benchmark", "survey", "clinical", "humanities"}
+LIST_PLAN_FIELDS = (
+    "figures_to_reference", "required_sections", "mechanism_flow", "key_numbers",
+    "claim_boundaries", "limitations", "followup_questions",
+)
+
+
+def _validate_plan(plan) -> list[str]:
+    """校验计划 JSON 的关键字段，返回错误列表（空 = 合法）。"""
+    if not isinstance(plan, dict):
+        return ["plan 不是 JSON 对象"]
+    errs: list[str] = []
+    if plan.get("paper_type") not in ALLOWED_PAPER_TYPES:
+        errs.append(f"paper_type 非法：{plan.get('paper_type')!r}")
+    for f in LIST_PLAN_FIELDS:
+        v = plan.get(f)
+        if v is not None and not isinstance(v, list):
+            errs.append(f"{f} 应为数组")
+    return errs
+
+
 def llm_plan(bundle: dict, cfg: dict) -> dict:
     client = _client(cfg)
     last_err = None
     for _ in range(3):  # 推理模型输出可能截断/加围栏，容错重试
-        try:
-            resp = client.chat.completions.create(
-                model=cfg["llm_model"],
-                messages=[
-                    {"role": "system", "content": PLAN_SYSTEM},
-                    {"role": "user", "content": _plan_user(bundle)},
-                ],
-                temperature=0.3,
-                max_tokens=8000,
-                response_format={"type": "json_object"},
-            )
-            text = resp.choices[0].message.content or ""
-            extracted = _extract_json(text)
-            plan = json.loads(extracted)
-            if isinstance(plan, dict):
+        for use_json_mode in (True, False):  # 部分接口不支持 response_format，回退普通请求
+            try:
+                kwargs = {"response_format": {"type": "json_object"}} if use_json_mode else {}
+                resp = client.chat.completions.create(
+                    model=cfg["llm_model"],
+                    messages=[
+                        {"role": "system", "content": PLAN_SYSTEM(cfg)},
+                        {"role": "user", "content": _plan_user(bundle)},
+                    ],
+                    temperature=0.3,
+                    max_tokens=8000,
+                    **kwargs,
+                )
+                text = resp.choices[0].message.content or ""
+                plan = json.loads(_extract_json(text))
+                errs = _validate_plan(plan)
+                if errs:
+                    raise ValueError("plan 校验失败：" + "; ".join(errs))
                 return plan
-            last_err = ValueError("plan 不是 JSON 对象")
-        except Exception as e:
-            last_err = e
+            except Exception as e:
+                last_err = e
     raise ValueError(f"LLM 计划生成失败：{last_err}")
 
 
-WRITE_SYSTEM = """你是一名图像超分辨率（SR）与行人重识别（ReID）领域的资深研究员，正在为同行写一份
+WRITE_SYSTEM_TMPL = """{profile}，正在为同行写一份
 复现导向的深度精读笔记。基于证据包与写作计划输出整篇笔记正文（Markdown）。
 只输出正文，不要 frontmatter，不要前言或总结。图表文件夹里（images/<note_key>/）有提取出的图片。
 
@@ -382,10 +451,14 @@ WRITE_SYSTEM = """你是一名图像超分辨率（SR）与行人重识别（ReI
 - 禁止输出「待补充」「占位符」「暂无」「TBD」等空内容占位词——证据包提供的材料必须直接写实，材料没有的章节就写「信息不足，需读原文」并保持该章节存在"""
 
 
+def WRITE_SYSTEM(cfg: dict) -> str:
+    return WRITE_SYSTEM_TMPL.format(profile=_domain_profile(cfg))
+
+
 def _write_user(bundle: dict, plan: dict, note_key: str) -> str:
     plan_for_model = {k: v for k, v in plan.items() if k != "required_sections"}
     return (
-        f"图表文件夹：images/{note_key}/\n\n"
+        f"图表文件夹：images/{safe_citekey(note_key)}/\n\n"
         "证据包（JSON）：\n" + json.dumps(bundle, ensure_ascii=False) + "\n\n"
         "写作计划（JSON）：\n" + json.dumps(plan_for_model, ensure_ascii=False)
         + "\n\n请输出完整笔记正文。"
@@ -410,7 +483,7 @@ def llm_write(bundle: dict, plan: dict, cfg: dict, note_key: str) -> str:
             resp = client.chat.completions.create(
                 model=cfg["llm_model"],
                 messages=[
-                    {"role": "system", "content": WRITE_SYSTEM},
+                    {"role": "system", "content": WRITE_SYSTEM(cfg)},
                     {"role": "user", "content": _write_user(bundle, plan, note_key)},
                 ],
                 temperature=0.7,
@@ -521,19 +594,22 @@ FIX_SYSTEM = """你是论文笔记的审校专家。给定一份草稿笔记和�
 - 修正时同样遵守格式约束：表格单元格内不用 $...$ 公式、表格各行列数一致、标题只用 ##/###。"""
 
 
-def llm_fix(body: str, issues: list[str], cfg: dict) -> str:
+def llm_fix(body: str, issues: list[str], cfg: dict, bundle: dict | None = None) -> str:
     client = _client(cfg)
     last_err = None
     for _ in range(2):  # 修复轮也可能输出过短骨架，重试一次
         try:
+            user_content = "问题清单：\n" + "\n".join(f"- {i}" for i in issues) + "\n\n"
+            if bundle is not None:
+                # 修复轮附上原始证据包，约束修正以事实为准，不脱离证据重写
+                user_content += "原始证据包（JSON，修正时必须以其中的事实为准）：\n" \
+                    + json.dumps(bundle, ensure_ascii=False) + "\n\n"
+            user_content += "草稿笔记：\n" + body + "\n\n请输出修正后的完整正文。"
             resp = client.chat.completions.create(
                 model=cfg["llm_model"],
                 messages=[
                     {"role": "system", "content": FIX_SYSTEM},
-                    {"role": "user", "content": (
-                        "问题清单：\n" + "\n".join(f"- {i}" for i in issues) + "\n\n"
-                        "草稿笔记：\n" + body + "\n\n请输出修正后的完整正文。"
-                    )},
+                    {"role": "user", "content": user_content},
                 ],
                 temperature=0.4,
                 max_tokens=12000,
@@ -614,8 +690,15 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
         if pdf_text:
             figures = _extract_figures(paper.get("pdf_path"), note_key)
 
-    has_evidence = bool(pdf_text.strip()) or bool((paper.get("abstract") or "").strip())
-    if not has_evidence:
+    # 证据等级三级：fulltext（读全正文）/ abstract_only（仅摘要）/ none（无证据）
+    abstract = (paper.get("abstract") or "").strip()
+    if pdf_text.strip():
+        evidence = "fulltext"
+    elif abstract:
+        evidence = "abstract_only"
+    else:
+        evidence = "none"
+    if evidence == "none":
         content = render_skeleton(
             paper, cfg, note_file,
             reason="PDF 正文不可读（扫描版或无 PDF）且库中无摘要",
@@ -630,7 +713,7 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
         issues = lint_note(body, plan, figures, note_key)
         if issues:
             try:
-                body = llm_fix(body, issues, cfg)
+                body = llm_fix(body, issues, cfg, bundle)
                 issues = lint_note(body, plan, figures, note_key)  # 二次校验修复结果
             except Exception:
                 pass  # 修复调用失败保留原稿，按首次 lint 结果判定
@@ -641,4 +724,7 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
         cleanup_figures(figures)  # LLM 阶段失败：清掉暂存图表，避免残留
         raise
     content = _substitute(template, paper, body, note_file)
-    return {"content": content, "figures": figures, "status": "ok"}
+    if evidence == "abstract_only":
+        content = _add_evidence_line(content, "abstract_only")
+    return {"content": content, "figures": figures,
+            "status": "ok" if evidence == "fulltext" else "abstract_only"}

@@ -7,6 +7,7 @@
   "llm_api_key": "",
   "llm_model": "deepseek-chat",
   "llm_enabled": true,
+  "llm_profile": "",
   "overwrite": false,
   "only_with_pdf": true,
   "use_pdf_text": true

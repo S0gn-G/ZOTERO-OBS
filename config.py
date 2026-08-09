@@ -28,8 +28,8 @@ def resource_path(name: str) -> str:
 DEFAULT_CONFIG = {
     # Zotero
     "zotero_base": "http://127.0.0.1:23119/api/",
-    # Obsidian
-    "vault_path": r"C:\Users\pbrii\Desktop\论文笔记\REID",
+    # Obsidian（首启为空，由用户在 设置 中填写，不写死开发者本机路径）
+    "vault_path": "",
     "notes_folder": "LiteratureNotes",
     # 笔记模板文件路径（空则用程序目录内 template.md）
     "template_path": os.path.join(BASE_DIR, "template.md"),
@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
     "llm_api_key": "",
     "llm_model": "deepseek-chat",
     "llm_enabled": True,
+    # 领域画像：空则用默认「SR/ReID 研究员」，可改成自己领域（如 CV / NLP / 医学）的描述
+    "llm_profile": "",
     # 生成选项
     "overwrite": False,
     # 仅显示含 PDF 附件的文献（隐藏视频/网页快照等）
