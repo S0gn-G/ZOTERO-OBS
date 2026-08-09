@@ -91,3 +91,29 @@ def test_fetch_papers_pagination(monkeypatch):
     papers = ZoteroClient("http://x").fetch_papers()
     assert len(calls) == 2
     assert len(papers) == 150
+
+
+def test_fetch_papers_prefers_local_pdf_over_earlier_remote_attachment(monkeypatch):
+    paper = {"key": "ITEM1", "data": {"itemType": "journalArticle", "title": "Paper"}}
+    remote = {
+        "key": "ATT1",
+        "data": {"itemType": "attachment", "contentType": "application/pdf", "parentItem": "ITEM1"},
+        "links": {"enclosure": {"href": "https://example.com/paper.pdf"}},
+    }
+    local = {
+        "key": "ATT2",
+        "data": {"itemType": "attachment", "contentType": "application/pdf", "parentItem": "ITEM1"},
+        "links": {"enclosure": {"href": "file:///C:/Papers/local.pdf"}},
+    }
+
+    class FakeResp:
+        headers = {"Total-Results": "3"}
+
+        @staticmethod
+        def json():
+            return [paper, remote, local]
+
+    monkeypatch.setattr(ZoteroClient, "_get_resp", lambda self, path: FakeResp())
+
+    papers = ZoteroClient("http://x").fetch_papers()
+    assert papers[0]["pdf_path"].endswith("local.pdf")

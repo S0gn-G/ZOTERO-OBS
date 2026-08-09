@@ -54,6 +54,22 @@ def _no_text(pdf_path, max_chars=30000):
     return ""
 
 
+def test_plan_system_inserts_profile_without_formatting_json_schema():
+    prompt = ng.PLAN_SYSTEM(_cfg(llm_profile="计算机视觉研究者"))
+
+    assert prompt.startswith("计算机视觉研究者。")
+    assert '"paper_type"' in prompt
+    assert "{profile}" not in prompt
+
+
+def test_write_system_inserts_profile_without_formatting_formula_example():
+    prompt = ng.WRITE_SYSTEM(_cfg(llm_profile="计算机视觉研究者"))
+
+    assert prompt.startswith("计算机视觉研究者，")
+    assert "$I_{feat}$" in prompt
+    assert "{profile}" not in prompt
+
+
 def test_evidence_none_skeleton(monkeypatch):
     monkeypatch.setattr(ng, "_extract_pdf_text", _no_text)
     paper = _paper()
@@ -82,6 +98,7 @@ def test_evidence_fulltext(monkeypatch):
     result = ng.generate_note(paper, _cfg(), note_key="cite")
     assert result["status"] == "ok"
     assert "evidence:" not in result["content"]
+    assert 'note_file: "T.md"' in result["content"]
 
 
 def test_llm_failure_cleans_figures(monkeypatch):

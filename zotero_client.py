@@ -64,6 +64,7 @@ class ZoteroClient:
                 d.get("itemType") == "attachment"
                 and d.get("contentType") == "application/pdf"
                 and d.get("parentItem")
+                and self._pdf_path(it)
             ):
                 att_by_parent.setdefault(d["parentItem"], it)
         papers = []
