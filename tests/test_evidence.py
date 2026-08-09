@@ -1,4 +1,4 @@
-"""generate_note 证据等级与 LLM 开关分支（monkeypatch 掉全部 LLM/PDF 调用）。"""
+"""generate_note 证据等级测试（monkeypatch 掉全部 LLM/PDF 调用）。"""
 import os
 import tempfile
 
@@ -20,7 +20,6 @@ def _paper(**kw):
 
 def _cfg(**kw):
     cfg = {
-        "llm_enabled": True, "use_pdf_text": True,
         "llm_base_url": "http://x", "llm_api_key": "k", "llm_model": "m",
         "llm_profile": "",
     }
@@ -53,14 +52,6 @@ def _fake_plan(bundle, cfg):
 
 def _no_text(pdf_path, max_chars=30000):
     return ""
-
-
-def test_llm_disabled_renders_template(monkeypatch):
-    paper = _paper()
-    result = ng.generate_note(paper, _cfg(llm_enabled=False), note_key="cite")
-    assert result["status"] == "ok"
-    assert result["figures"] == []
-    assert "## 我的笔记" in result["content"]
 
 
 def test_evidence_none_skeleton(monkeypatch):
@@ -144,4 +135,3 @@ def test_special_char_citekey_canonical_refs_pass_lint(monkeypatch):
     assert result["figures"] == [fig]
     ng.cleanup_figures(result["figures"])
     assert not os.path.exists(staging)  # 调用方拷图后清理暂存
-

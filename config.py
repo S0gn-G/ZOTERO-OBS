@@ -1,4 +1,4 @@
-"""配置读写：Zotero / LLM / Obsidian vault 设置，保存在 config.json（程序所在目录）。
+"""配置读写：LLM / 笔记输出设置，保存在 config.json（程序所在目录）。
 
 打包成 exe 后，配置和模板文件放在 exe 旁边，方便用户直接编辑。
 """
@@ -26,26 +26,16 @@ def resource_path(name: str) -> str:
     return os.path.join(BASE_DIR, name)
 
 DEFAULT_CONFIG = {
-    # Zotero
-    "zotero_base": "http://127.0.0.1:23119/api/",
-    # Obsidian（首启为空，由用户在 设置 中填写，不写死开发者本机路径）
-    "vault_path": "",
-    "notes_folder": "LiteratureNotes",
+    # 直接选择最终笔记目录，不再拆成 Vault + 子目录两个设置。
+    "notes_path": "",
     # 笔记模板文件路径（空则用程序目录内 template.md）
     "template_path": os.path.join(BASE_DIR, "template.md"),
     # LLM (OpenAI 兼容)
     "llm_base_url": "https://api.deepseek.com/v1",
     "llm_api_key": "",
     "llm_model": "deepseek-chat",
-    "llm_enabled": True,
-    # 领域画像：空则用默认「SR/ReID 研究员」，可改成自己领域（如 CV / NLP / 医学）的描述
+    # 研究领域与写作偏好；留空使用通用学术研究者设定。
     "llm_profile": "",
-    # 生成选项
-    "overwrite": False,
-    # 仅显示含 PDF 附件的文献（隐藏视频/网页快照等）
-    "only_with_pdf": True,
-    # LLM 生成前读取 PDF 正文（提升摘要质量，稍慢）
-    "use_pdf_text": True,
 }
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -56,12 +46,21 @@ def load_config() -> dict:
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
+                saved = json.load(f)
+            # v0.1 配置迁移：Vault + 子目录只在这里合并一次。
+            if not saved.get("notes_path") and saved.get("vault_path"):
+                saved["notes_path"] = os.path.join(
+                    saved["vault_path"], saved.get("notes_folder", "LiteratureNotes")
+                )
+            cfg.update({k: v for k, v in saved.items() if k in DEFAULT_CONFIG})
         except (json.JSONDecodeError, OSError):
             pass
     return cfg
 
 
 def save_config(cfg: dict) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        payload = {key: cfg.get(key, default) for key, default in DEFAULT_CONFIG.items()}
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONFIG_PATH)
