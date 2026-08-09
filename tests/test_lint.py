@@ -43,3 +43,22 @@ def test_lint_figure_ref_check():
     figures = [{"name": "fig_2.png"}]
     issues = lint_note(body, {"paper_type": "benchmark"}, figures, "k")
     assert any("不存在的文件" in i for i in issues)
+
+
+def test_lint_canonical_dir_no_false_positive():
+    # 特殊字符 citekey 下，prompt/落盘/lint 统一用唯一 stem；正确路径不应被误报
+    body = ("## 核心信息\n## 原文摘要翻译\n## 创新点\n## 一句话总结\n"
+            "![图](images/Wang_Li_2022-K1/fig_1_p1.png)\n")
+    figures = [{"name": "fig_1_p1.png"}]
+    issues = lint_note(body, {"paper_type": "benchmark"}, figures, "Wang_Li_2022-K1")
+    assert not any("不存在的文件" in i for i in issues)
+    assert issues == []
+
+
+def test_lint_canonical_dir_missing_ref_still_flagged():
+    # 正确目录下引用不存在的图名仍要报（目录对、文件错）
+    body = ("## 核心信息\n## 原文摘要翻译\n## 创新点\n## 一句话总结\n"
+            "![图](images/Wang_Li_2022-K1/fig_1_p1.png)\n")
+    figures = [{"name": "fig_9_p1.png"}]
+    issues = lint_note(body, {"paper_type": "benchmark"}, figures, "Wang_Li_2022-K1")
+    assert any("不存在的文件" in i for i in issues)

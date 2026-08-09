@@ -14,6 +14,14 @@ MY_NOTES_HEADING = "## 我的笔记"
 QUESTIONS_HEADING = "## 疑问"
 
 
+# Windows 保留设备名：即使带扩展名也非法（CON.md / NUL.txt / COM1.pdf…）
+_WINDOWS_RESERVED = (
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 def safe_citekey(key: str, fallback: str = "note") -> str:
     """把 Zotero/Better BibTeX 的 citekey 规范化为安全文件名片段。
 
@@ -24,7 +32,16 @@ def safe_citekey(key: str, fallback: str = "note") -> str:
     s = re.sub(r"[^A-Za-z0-9_.\-]", "_", s)
     s = re.sub(r"\.{2,}", "_", s)
     s = s.strip("._-") or fallback
+    if s.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+        s = "_" + s
     return s[:80]
+
+
+def note_stem(citation_key: str, zotero_key: str) -> str:
+    """唯一文件名/图片目录片段：<safe citekey>-<zotero key>。
+
+    zotero key 全局稳定唯一，即使不同 citekey sanitize 后碰撞也不会互相覆盖。"""
+    return f"{safe_citekey(citation_key)}-{zotero_key}"
 
 
 def _section_body(content: str, heading: str, until: str | None) -> str | None:
@@ -65,8 +82,13 @@ class ObsidianWriter:
     def __init__(self, vault_path: str, notes_folder: str):
         self.notes_dir = os.path.join(vault_path, notes_folder) if vault_path else ""
 
-    def note_path(self, citation_key: str) -> str:
-        return os.path.join(self.notes_dir, f"{safe_citekey(citation_key)}.md")
+    def _stem(self, citation_key: str, zotero_key: str | None = None) -> str:
+        if zotero_key:
+            return note_stem(citation_key, zotero_key)
+        return safe_citekey(citation_key)
+
+    def note_path(self, citation_key: str, zotero_key: str | None = None) -> str:
+        return os.path.join(self.notes_dir, f"{self._stem(citation_key, zotero_key)}.md")
 
     def scan_states(self) -> list[tuple[str, str, float]]:
         """单次扫描笔记目录，返回 [(zotero_key, state, mtime)]。
@@ -141,21 +163,43 @@ class ObsidianWriter:
         """各笔记文件的最后修改时间。Obsidian 里编辑即更新，从未编辑过时即生成时间。"""
         return {key: mtime for key, _flag, mtime in self.scan_states()}
 
-    def write_note(self, citation_key: str, content: str) -> str:
-        os.makedirs(self.notes_dir, exist_ok=True)
-        path = self.note_path(citation_key)
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
+    @staticmethod
+    def _atomic_write(path: str, content: str) -> None:
+        """先写临时文件再 os.replace，避免写一半崩溃留下截断文件。"""
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _zotero_key_of(path: str) -> str | None:
+        """读取笔记 frontmatter 的 zotero_key；文件缺失/无该字段返回 None。"""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                m = FRONTMATTER_KEY_RE.search(f.read(2000))
+                return m.group(1) if m else None
+        except OSError:
+            return None
+
+    def write_note(self, citation_key: str, content: str, zotero_key: str | None = None) -> str:
+        os.makedirs(self.notes_dir, exist_ok=True)
+        path = self.note_path(citation_key, zotero_key)
+        self._atomic_write(path, content)
         return path
 
     def write_note_preserving(self, citation_key: str, content: str, zotero_key: str | None = None) -> str:
         """写笔记，保留旧笔记的「我的笔记/疑问」手写区。
 
-        目标文件（<citekey>.md）存在则直接合并旧手写区；若用户在 Obsidian 里改过名
-        （规范路径不存在），则按 frontmatter zotero_key 定位实际文件并写入该路径，
-        避免产生第二份、也不丢手写内容。返回实际写入的路径。"""
-        target = self.note_path(citation_key)
-        old_path = target if os.path.exists(target) else None
+        目标文件（<safe citekey>-<zotero key>.md）存在且确属本文（frontmatter zotero_key
+        匹配）才继承手写区；若用户在 Obsidian 里改过名（规范路径不存在），则按 zotero_key
+        定位实际文件并写入该路径，避免第二份、也不丢手写内容。返回实际写入路径。"""
+        target = self.note_path(citation_key, zotero_key)
+        old_path = None
+        if os.path.exists(target):
+            owner = self._zotero_key_of(target)
+            if owner is None or owner == (zotero_key or citation_key):
+                old_path = target
+        # 目标被他人占用（异常）或路径不存在 → 按 zotero_key 精确定位本文旧笔记
         if old_path is None and zotero_key:
             old_path = self._find_note_by_key(zotero_key)
         old = ""
@@ -168,29 +212,48 @@ class ObsidianWriter:
         merged = merge_handwritten(old, content)
         if old_path:
             os.makedirs(os.path.dirname(old_path), exist_ok=True)
-            with open(old_path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(merged)
+            self._atomic_write(old_path, merged)
             return old_path
-        return self.write_note(citation_key, merged)
+        return self.write_note(citation_key, merged, zotero_key)
 
-    def import_images(self, citation_key: str, figures: list[dict]) -> list[str]:
-        """把暂存目录里的图表拷贝到 notes_dir/images/<citekey>/。
+    def import_images(self, citation_key: str, figures: list[dict], zotero_key: str | None = None) -> list[str]:
+        """事务式导入图表：全部先拷入 <dir>.tmp，全部成功才一次性并入正式目录。
 
-        返回未成功写入的文件名列表（源缺失 / 复制失败）。正文引用必须全部落盘，
-        调用方据此判定是否将本次生成判为失败，避免「笔记在而图不在」。"""
+        任一图缺失/拷贝失败时清理 tmp、正式目录不变，返回缺失文件名列表；空 = 已成功提交。
+        这样失败生成不会留下「旧 Markdown + 新图」的污染。"""
         if not figures:
             return []
-        dest_dir = os.path.join(self.notes_dir, "images", safe_citekey(citation_key))
-        os.makedirs(dest_dir, exist_ok=True)
+        dest_dir = os.path.join(self.notes_dir, "images", self._stem(citation_key, zotero_key))
+        staging = dest_dir + ".tmp"
+        if os.path.isdir(staging):
+            shutil.rmtree(staging, ignore_errors=True)  # 清上次崩溃残留
+        os.makedirs(staging, exist_ok=True)
         missing: list[str] = []
         for f in figures:
             src = f.get("staging_path")
+            name = f["name"]
             if not src or not os.path.exists(src):
-                missing.append(f["name"])
+                missing.append(name)
                 continue
-            dst = os.path.join(dest_dir, f["name"])
             try:
-                shutil.copy2(src, dst)
+                shutil.copy2(src, os.path.join(staging, name))
             except OSError:
-                missing.append(f["name"])
-        return missing
+                missing.append(name)
+        if missing:
+            shutil.rmtree(staging, ignore_errors=True)
+            return missing
+        # 全部成功：一次性切换（旧目录先移走，新目录就位；切换失败回滚旧目录）
+        backup = dest_dir + ".old"
+        if os.path.isdir(backup):
+            shutil.rmtree(backup, ignore_errors=True)
+        if os.path.isdir(dest_dir):
+            os.replace(dest_dir, backup)
+        try:
+            os.replace(staging, dest_dir)
+        except Exception:
+            if os.path.isdir(backup) and not os.path.isdir(dest_dir):
+                os.replace(backup, dest_dir)
+            raise
+        if os.path.isdir(backup):
+            shutil.rmtree(backup, ignore_errors=True)
+        return []

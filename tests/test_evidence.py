@@ -116,3 +116,32 @@ def test_cleanup_figures_idempotent(tmp_path):
     d.mkdir()
     ng.cleanup_figures([{"name": "x.png", "staging_path": str(d / "x.png")}])
     assert d.is_dir()  # 目录名不合法，不应被删
+
+
+def test_special_char_citekey_canonical_refs_pass_lint(monkeypatch):
+    staging = tempfile.mkdtemp(prefix="zotnotes_fig_spe_")
+    fig = {"name": "fig_1_p1.png", "page": 1, "caption": "Figure 1",
+           "staging_path": os.path.join(staging, "fig_1_p1.png")}
+    open(fig["staging_path"], "w").close()
+    monkeypatch.setattr(ng, "_extract_pdf_text", lambda p, max_chars=30000: "text " * 100)
+    monkeypatch.setattr(ng, "_extract_figures", lambda p, k: [fig])
+
+    def plan_fn(bundle, cfg):
+        p = _fake_plan(bundle, cfg)
+        p["figures_to_reference"] = ["fig_1_p1.png"]
+        return p
+
+    def write_fn(bundle, plan, cfg, image_dir):
+        assert image_dir == "Wang_Li_2022-K1"  # 唯一 stem 贯通到 llm_write
+        return _clean_body() + f"\n![图](images/{image_dir}/fig_1_p1.png)\n"
+
+    monkeypatch.setattr(ng, "llm_plan", plan_fn)
+    monkeypatch.setattr(ng, "llm_write", write_fn)
+    paper = _paper(key="K1", pdf_path="C:/x.pdf")
+    result = ng.generate_note(paper, _cfg(), note_key="Wang&Li,2022")
+    assert result["status"] == "ok"  # lint 未把正确 canonical 路径误报，未触发失败
+    assert "Wang_Li_2022-K1" in result["content"]
+    assert result["figures"] == [fig]
+    ng.cleanup_figures(result["figures"])
+    assert not os.path.exists(staging)  # 调用方拷图后清理暂存
+

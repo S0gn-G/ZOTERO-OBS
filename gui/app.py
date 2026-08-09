@@ -336,7 +336,7 @@ class App(ctk.CTk):
             result = generate_note(row.paper, cfg, note_key=row.note_key)
             figures = result["figures"]
             if figures:
-                missing = writer.import_images(row.note_key, figures)
+                missing = writer.import_images(row.note_key, figures, zotero_key=row.paper["key"])
                 if missing:
                     return False, "failed", f"图表拷贝失败：{', '.join(missing)}"
             writer.write_note_preserving(row.note_key, result["content"], zotero_key=row.paper["key"])

@@ -21,7 +21,7 @@ import tempfile
 from openai import OpenAI
 
 from config import BASE_DIR
-from obsidian_writer import safe_citekey
+from obsidian_writer import note_stem, safe_citekey
 
 PDF_MAX_CHARS = 30000  # 深度笔记需要更多证据
 
@@ -51,8 +51,13 @@ def _extract_pdf_text(pdf_path: str, max_chars: int = PDF_MAX_CHARS) -> str:
 
 # 图注识别：Figure/Fig. 与 Table/Tab.，捕获类型与编号
 CAPTION_RE = re.compile(r"(?im)^\s*(?:(Figure|Fig\.?)|(Table|Tab\.?))\s+(\d+)[.:]\s*(.*)$")
-MIN_FIG_H = 60     # 渲染区域最小高度（像素，过滤装饰性图注）
-FIG_SCALE = 2.0    # 渲染缩放
+MIN_FIG_H = 60          # 渲染区域最小高度（像素，过滤装饰性图注）
+FIG_SCALE = 2.0         # 渲染缩放
+FIG_CAPTION_MAX_GAP = 60  # 图/表与其 caption 之间允许的最大空隙（点）
+FIG_MAX_HEIGHT = 360      # fig 从 caption 向上最多找多高
+MARGIN_TOP = 55.0         # 页边距上界
+MARGIN_BOTTOM = 40.0      # 页边距下界
+MARGIN_LEFT = 45.0        # 页边距左界
 
 
 def _page_captions(doc, page_no: int) -> list[dict]:
@@ -78,7 +83,7 @@ def _page_captions(doc, page_no: int) -> list[dict]:
 
 
 def _image_rects(page) -> list:
-    """页面内嵌图片的矩形列表（用于图注上方纵向向上探图）。渲染异常时返回空。"""
+    """页面内嵌图片的矩形列表（用于图注附近纵向探图）。渲染异常时返回空。"""
     try:
         rects: list = []
         for img in page.get_images(full=True):
@@ -88,12 +93,37 @@ def _image_rects(page) -> list:
         return []
 
 
-def _extract_figures(pdf_path: str, note_key: str) -> list[dict]:
+def _clip_region(cap, next_cap, image_rects, prev_bottom, margin_top, page_w, page_h):
+    """按图注类型计算裁剪区 (x0, y0, x1, y1)。
+
+    fig（图注在图下方）：默认裁 caption 上方，可用内嵌图片 bbox 在 gap 内上探；
+    table（图注在表格上方）：默认裁 caption 下方，向下探到 next caption 或页底。
+    返回 y 区间为 [y0, y1)；过矮区间由调用方跳过。"""
+    x0 = MARGIN_LEFT
+    x1 = max(page_w - MARGIN_LEFT, MARGIN_LEFT + 100)
+    if cap["kind"] == "table":
+        y0 = max(margin_top, prev_bottom, cap["y1"] + 4)
+        y1 = (next_cap["y0"] - 4) if next_cap else (page_h - MARGIN_BOTTOM)
+        for r in image_rects:
+            if 0 <= r.y0 - cap["y1"] <= FIG_CAPTION_MAX_GAP and r.y1 > cap["y1"] \
+                    and r.x1 > x0 and r.x0 < x1:
+                y1 = max(y1, r.y1)
+    else:  # fig
+        y1 = cap["y0"] - 4
+        y0 = max(margin_top, prev_bottom, y1 - FIG_MAX_HEIGHT)
+        for r in image_rects:
+            if 0 <= cap["y0"] - r.y1 <= FIG_CAPTION_MAX_GAP and r.y0 < cap["y0"] \
+                    and r.x1 > x0 and r.x0 < x1:
+                y0 = min(y0, r.y0)
+    return x0, y0, x1, y1
+
+
+def _extract_figures(pdf_path: str, seed: str) -> list[dict]:
     """按图注定位并渲染 PDF 中的图表区域（能抓住矢量 pipeline/架构图）。
 
-    对每页：找到所有 "Figure N / Fig. N / Table N / Tab. N" 图注，渲染从上一个
-    图注底边到当前图注顶边之间的区域；页首的图渲染到页边距。横向放宽到正文整页
-    宽度（图注通常比图本身窄，不能按图注宽度裁剪），纵向用页面内嵌图片区域上探。
+    Figure：图注在下方，裁图注上方区域，可用内嵌图片 bbox 上探（允许合理 gap）；
+    Table：图注在表格上方，裁图注下方直到下一个图注或页底。
+    横向放宽到正文整页宽度（图注通常比图本身窄，不能按图注宽度裁剪）。
     暂存到临时目录。返回 [{name, page, caption, staging_path}]。无图注的页不提取。
     """
     if not pdf_path or not os.path.exists(pdf_path):
@@ -102,7 +132,7 @@ def _extract_figures(pdf_path: str, note_key: str) -> list[dict]:
         import fitz  # PyMuPDF
     except ImportError:
         return []
-    staging = tempfile.mkdtemp(prefix=f"zotnotes_fig_{safe_citekey(note_key)}_")
+    staging = tempfile.mkdtemp(prefix=f"zotnotes_fig_{seed}_")
     figs: list[dict] = []
     doc = None
     try:
@@ -112,21 +142,14 @@ def _extract_figures(pdf_path: str, note_key: str) -> list[dict]:
             if not caps:
                 continue
             page = doc[pno - 1]
-            margin_top = 55.0   # 页边距上界
-            margin_left = 45.0
             page_w = page.rect.width
+            page_h = page.rect.height
             image_rects = _image_rects(page)
-            prev_bottom = margin_top
-            for cap in caps:
-                # 横向放宽到正文整页宽度
-                x0 = margin_left
-                x1 = max(page_w - margin_left, margin_left + 100)
-                # 纵向：图注上方、横向重叠的内嵌图片区域，上探到其顶边；无则 320pt 兜底
-                y0 = max(prev_bottom, cap["y0"] - 320)
-                for r in image_rects:
-                    if r.y1 >= cap["y0"] - 4 and r.y0 < cap["y0"] and r.x1 > x0 and r.x0 < x1:
-                        y0 = min(y0, r.y0)
-                y1 = cap["y0"] - 4
+            prev_bottom = MARGIN_TOP
+            for i, cap in enumerate(caps):
+                next_cap = caps[i + 1] if i + 1 < len(caps) else None
+                x0, y0, x1, y1 = _clip_region(cap, next_cap, image_rects, prev_bottom,
+                                              MARGIN_TOP, page_w, page_h)
                 if y1 - y0 < MIN_FIG_H:
                     prev_bottom = cap["y1"]
                     continue
@@ -140,7 +163,7 @@ def _extract_figures(pdf_path: str, note_key: str) -> list[dict]:
                     prev_bottom = cap["y1"]
                     continue
                 figs.append({"name": name, "page": pno, "caption": cap["text"], "staging_path": path})
-                prev_bottom = cap["y1"]
+                prev_bottom = cap["y1"] if cap["kind"] == "fig" else max(prev_bottom, y1)
     except Exception:
         pass  # 渲染部分失败返回已有图；doc 由 finally 保证关闭
     finally:
@@ -400,7 +423,7 @@ def llm_plan(bundle: dict, cfg: dict) -> dict:
 
 WRITE_SYSTEM_TMPL = """{profile}，正在为同行写一份
 复现导向的深度精读笔记。基于证据包与写作计划输出整篇笔记正文（Markdown）。
-只输出正文，不要 frontmatter，不要前言或总结。图表文件夹里（images/<note_key>/）有提取出的图片。
+只输出正文，不要 frontmatter，不要前言或总结。图表文件夹里（images/<image_dir>/）有提取出的图片。
 
 笔记章节必须按以下顺序：
 ## 核心信息
@@ -455,10 +478,10 @@ def WRITE_SYSTEM(cfg: dict) -> str:
     return WRITE_SYSTEM_TMPL.format(profile=_domain_profile(cfg))
 
 
-def _write_user(bundle: dict, plan: dict, note_key: str) -> str:
+def _write_user(bundle: dict, plan: dict, image_dir: str) -> str:
     plan_for_model = {k: v for k, v in plan.items() if k != "required_sections"}
     return (
-        f"图表文件夹：images/{safe_citekey(note_key)}/\n\n"
+        f"图表文件夹：images/{image_dir}/\n\n"
         "证据包（JSON）：\n" + json.dumps(bundle, ensure_ascii=False) + "\n\n"
         "写作计划（JSON）：\n" + json.dumps(plan_for_model, ensure_ascii=False)
         + "\n\n请输出完整笔记正文。"
@@ -475,7 +498,7 @@ def _strip_fences(text: str) -> str:
     return t.strip()
 
 
-def llm_write(bundle: dict, plan: dict, cfg: dict, note_key: str) -> str:
+def llm_write(bundle: dict, plan: dict, cfg: dict, image_dir: str) -> str:
     client = _client(cfg)
     last_err = None
     for _ in range(3):  # 推理模型偶发返回空 content，重试
@@ -484,7 +507,7 @@ def llm_write(bundle: dict, plan: dict, cfg: dict, note_key: str) -> str:
                 model=cfg["llm_model"],
                 messages=[
                     {"role": "system", "content": WRITE_SYSTEM(cfg)},
-                    {"role": "user", "content": _write_user(bundle, plan, note_key)},
+                    {"role": "user", "content": _write_user(bundle, plan, image_dir)},
                 ],
                 temperature=0.7,
                 max_tokens=16000,
@@ -554,7 +577,7 @@ def _heading_issues(body: str) -> list[str]:
     return out
 
 
-def lint_note(body: str, plan: dict, figures: list[dict], note_key: str) -> list[str]:
+def lint_note(body: str, plan: dict, figures: list[dict], image_dir: str) -> list[str]:
     issues: list[str] = []
     for sec in ("## 核心信息", "## 原文摘要翻译", "## 创新点", "## 一句话总结"):
         if sec not in body:
@@ -568,14 +591,14 @@ def lint_note(body: str, plan: dict, figures: list[dict], note_key: str) -> list
     placeholder_hits = re.findall(r"(?:待补充|占位符|\[?TODO|TBD)", body)
     if placeholder_hits:
         issues.append(f"笔记含 {len(placeholder_hits)} 处占位符内容（待补充/TODO），需按证据包写实")
-    # 图表引用：必须指向已提取的图；计划选定的图必须被引用
+    # 图表引用：必须指向已提取的图；计划选定的图必须被引用。目录用唯一 stem（与 prompt/落盘一致）。
     refs = [m.group(1) for m in re.finditer(r"\]\((images/[^)]+)\)", body)]
-    wanted = {f"images/{note_key}/{f['name']}" for f in figures}
+    wanted = {f"images/{image_dir}/{f['name']}" for f in figures}
     for ref in refs:
         if ref not in wanted:
             issues.append(f"图表引用指向不存在的文件：{ref}")
     for name in plan.get("figures_to_reference") or []:
-        if f"images/{note_key}/{name}" not in refs:
+        if f"images/{image_dir}/{name}" not in refs:
             issues.append(f"计划要求引用的图表未在正文中出现：{name}")
     # 表格与标题质量（Obsidian 渲染约束）
     issues.extend(_table_issues(body))
@@ -674,11 +697,13 @@ def render_note(paper: dict, cfg: dict, note_file: str) -> str:
 
 def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
     """多阶段深度笔记管道。返回：
-    {"content": str, "figures": [figure_dict...], "status": "ok"|"needs_source"}
+    {"content": str, "figures": [figure_dict...], "status": "ok"|"abstract_only"|"needs_source"}
+    文件名与图片目录统一用唯一 stem（<safe citekey>-<zotero key>），杜绝 citekey sanitize 碰撞。
     LLM 关闭（cfg["llm_enabled"]=False）时按模板渲染，不调任何接口。
     LLM 调用失败时抛异常并清理暂存图表；成功后由调用方拷贝图表并调 cleanup_figures。
     """
-    note_file = note_key + ".md"
+    stem = note_stem(note_key, paper["key"])
+    note_file = stem + ".md"
     if not cfg.get("llm_enabled", True):
         # LLM 关闭：无需 PDF 正文/图表，直接按模板渲染（占位符 + 空 LLM 区块）
         return {"content": render_note(paper, cfg, note_file), "figures": [], "status": "ok"}
@@ -688,7 +713,7 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
     if cfg.get("use_pdf_text", True):
         pdf_text = _extract_pdf_text(paper.get("pdf_path"))
         if pdf_text:
-            figures = _extract_figures(paper.get("pdf_path"), note_key)
+            figures = _extract_figures(paper.get("pdf_path"), stem)
 
     # 证据等级三级：fulltext（读全正文）/ abstract_only（仅摘要）/ none（无证据）
     abstract = (paper.get("abstract") or "").strip()
@@ -709,15 +734,16 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
     bundle = _build_bundle(paper, cfg, pdf_text, figures)
     try:
         plan = llm_plan(bundle, cfg)
-        body = llm_write(bundle, plan, cfg, note_key)
-        issues = lint_note(body, plan, figures, note_key)
+        body = llm_write(bundle, plan, cfg, stem)
+        issues = lint_note(body, plan, figures, stem)
         if issues:
             try:
                 body = llm_fix(body, issues, cfg, bundle)
-                issues = lint_note(body, plan, figures, note_key)  # 二次校验修复结果
+                issues = lint_note(body, plan, figures, stem)  # 二次校验修复结果
             except Exception:
                 pass  # 修复调用失败保留原稿，按首次 lint 结果判定
-            fatal = [i for i in issues if "缺少必需章节" in i or "占位符" in i]
+            fatal = [i for i in issues
+                     if "缺少必需章节" in i or "占位符" in i or "图表引用指向不存在的文件" in i]
             if fatal:
                 raise ValueError("笔记校验未通过：" + "；".join(fatal))
     except Exception:
