@@ -24,7 +24,7 @@ def test_safe_citekey_sanitizes():
 
 
 def test_note_path_stays_inside_notes_dir(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     p = w.note_path("../escape")
     assert os.path.commonpath([str(tmp_path), p]) == str(tmp_path)
     assert p.endswith(".md")
@@ -39,7 +39,7 @@ def test_merge_handwritten_preserves_sections():
 
 
 def test_write_note_preserving_finds_renamed_note(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     os.makedirs(w.notes_dir, exist_ok=True)
     # 用户在 Obsidian 里改过名的旧笔记（规范路径不存在）
     renamed = os.path.join(w.notes_dir, "custom-name.md")
@@ -55,19 +55,19 @@ def test_write_note_preserving_finds_renamed_note(tmp_path):
 
 
 def test_write_note_preserving_creates_target_when_no_old(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     written = w.write_note_preserving("cite2022", "---\nzotero_key: \"K1\"\n---\n\n# X\n", zotero_key="K1")
     assert written == os.path.join(w.notes_dir, "cite2022-K1.md")
 
 
 def test_write_note_preserving_no_zotero_key_uses_safe_citekey(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     written = w.write_note_preserving("Wang&Li,2022", "---\nzotero_key: \"K1\"\n---\n\n# X\n")
     assert written == os.path.join(w.notes_dir, "Wang_Li_2022.md")
 
 
 def test_colliding_citekeys_write_independent_files(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     k1 = "---\nzotero_key: \"K1\"\n---\n\n# P1\n\n## 我的笔记\n\nK1_PRIVATE\n"
     k2 = "---\nzotero_key: \"K2\"\n---\n\n# P2\n\n## 我的笔记\n\nK2_PRIVATE\n"
     w.write_note_preserving("A&B", k1, zotero_key="K1")
@@ -84,63 +84,8 @@ def test_colliding_citekeys_write_independent_files(tmp_path):
     assert "K2_PRIVATE" in c2 and "K1_PRIVATE" not in c2
 
 
-def test_import_images_reports_missing(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
-    figs = [{"name": "fig_1.png", "staging_path": "N:/not/exist.png"}]
-    assert w.import_images("cite", figs) == ["fig_1.png"]
-
-
-def test_import_images_copies(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
-    src = tmp_path / "fig_1.png"
-    src.write_bytes(b"PNGDATA")
-    figs = [{"name": "fig_1.png", "staging_path": str(src)}]
-    assert w.import_images("cite", figs) == []
-    assert (tmp_path / "Notes" / "images" / "cite" / "fig_1.png").exists()
-
-
-def test_import_images_canonical_dir_with_zotero_key(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
-    src = tmp_path / "fig_1.png"
-    src.write_bytes(b"PNGDATA")
-    figs = [{"name": "fig_1.png", "staging_path": str(src)}]
-    assert w.import_images("A&B", figs, zotero_key="K1") == []
-    assert (tmp_path / "Notes" / "images" / "A_B-K1" / "fig_1.png").exists()
-
-
-def test_import_transaction_failure_keeps_old_images(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
-    dest = tmp_path / "Notes" / "images" / "cite-K1"
-    dest.mkdir(parents=True)
-    (dest / "fig_1.png").write_bytes(b"OLD")
-    good = tmp_path / "good.png"
-    good.write_bytes(b"NEW")
-    figs = [{"name": "fig_1.png", "staging_path": str(good)},
-            {"name": "fig_2.png", "staging_path": str(tmp_path / "missing.png")}]
-    assert w.import_images("cite", figs, zotero_key="K1") == ["fig_2.png"]
-    # 失败：正式目录保持旧图，新图未混入，无 .tmp / .old 残留
-    assert (dest / "fig_1.png").read_bytes() == b"OLD"
-    assert not (dest / "fig_2.png").exists()
-    assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
-    assert not (tmp_path / "Notes" / "images" / "cite-K1.old").exists()
-
-
-def test_import_transaction_success_replaces_old_images(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
-    dest = tmp_path / "Notes" / "images" / "cite-K1"
-    dest.mkdir(parents=True)
-    (dest / "fig_1.png").write_bytes(b"OLD")
-    new = tmp_path / "new.png"
-    new.write_bytes(b"NEW")
-    figs = [{"name": "fig_1.png", "staging_path": str(new)}]
-    assert w.import_images("cite", figs, zotero_key="K1") == []
-    assert (dest / "fig_1.png").read_bytes() == b"NEW"
-    assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
-    assert not (tmp_path / "Notes" / "images" / "cite-K1.old").exists()
-
-
 def test_scan_states_four_states(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     os.makedirs(w.notes_dir, exist_ok=True)
 
     def write(name, content):
@@ -156,7 +101,7 @@ def test_scan_states_four_states(tmp_path):
 
 
 def test_scan_states_ignores_placeholder_in_handwritten(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     os.makedirs(w.notes_dir, exist_ok=True)
     # TODO 只出现在「我的笔记」区（用户手写），不应误判为需修复
     content = "---\nzotero_key: \"K1\"\n---\n\n# A\n\n## 我的笔记\n\nTODO 待补充 占位符\n"
@@ -167,7 +112,7 @@ def test_scan_states_ignores_placeholder_in_handwritten(tmp_path):
 
 
 def test_scan_states_placeholder_in_llm_body(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     os.makedirs(w.notes_dir, exist_ok=True)
     # 正文（LLM 区）含占位符 → 需修复
     content = "---\nzotero_key: \"K1\"\n---\n\n# A\n\n待补充 待补充\n\n## 我的笔记\n"
@@ -180,7 +125,7 @@ def test_scan_states_placeholder_in_llm_body(tmp_path):
 # ---------- NotePathConflict：归属冲突 fail-closed ----------
 
 def test_owner_mismatch_raises_conflict(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     target = tmp_path / "Notes" / "A_B-K1.md"
     target.parent.mkdir(parents=True)
     target.write_text("---\nzotero_key: \"OTHER\"\n---\n\n# Other\n", encoding="utf-8")
@@ -190,7 +135,7 @@ def test_owner_mismatch_raises_conflict(tmp_path):
 
 
 def test_no_frontmatter_raises_conflict(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     target = tmp_path / "Notes" / "A_B-K1.md"
     target.parent.mkdir(parents=True)
     target.write_text("# 人工笔记，无 frontmatter\n", encoding="utf-8")
@@ -200,7 +145,7 @@ def test_no_frontmatter_raises_conflict(tmp_path):
 
 
 def test_owner_mismatch_but_renamed_exists_writes_renamed(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     os.makedirs(w.notes_dir, exist_ok=True)
     renamed = os.path.join(w.notes_dir, "custom-name.md")
     with open(renamed, "w", encoding="utf-8") as f:
@@ -213,7 +158,7 @@ def test_owner_mismatch_but_renamed_exists_writes_renamed(tmp_path):
 
 
 def test_owner_match_preserves_handwritten(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     target = tmp_path / "Notes" / "A_B-K1.md"
     target.parent.mkdir(parents=True)
     target.write_text("---\nzotero_key: \"K1\"\n---\n\n# Old\n\n## 我的笔记\n\n手写内容\n\n## 疑问\n", encoding="utf-8")
@@ -223,7 +168,7 @@ def test_owner_match_preserves_handwritten(tmp_path):
 
 
 def test_note_file_synced_to_renamed_basename(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     os.makedirs(w.notes_dir, exist_ok=True)
     renamed = os.path.join(w.notes_dir, "custom-name.md")
     with open(renamed, "w", encoding="utf-8") as f:
@@ -240,7 +185,7 @@ def test_note_file_synced_to_renamed_basename(tmp_path):
 # ---------- commit_generation：整体事务 ----------
 
 def test_commit_generation_success_commits_both(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     src = tmp_path / "fig_1.png"
     src.write_bytes(b"NEW")
     figs = [_fig("fig_1.png", src)]
@@ -252,14 +197,14 @@ def test_commit_generation_success_commits_both(tmp_path):
 
 
 def test_commit_generation_no_figures_writes_note_only(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     assert w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n", [], zotero_key="K1") == []
     assert (tmp_path / "Notes" / "cite-K1.md").exists()
     assert not (tmp_path / "Notes" / "images").exists()
 
 
 def test_commit_generation_missing_fig_no_commit(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     figs = [_fig("fig_1.png", str(tmp_path / "missing.png"))]
     assert w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n", figs, zotero_key="K1") == ["fig_1.png"]
     assert not (tmp_path / "Notes" / "cite-K1.md").exists()
@@ -267,7 +212,7 @@ def test_commit_generation_missing_fig_no_commit(tmp_path):
 
 
 def test_commit_generation_owner_conflict_raises(tmp_path):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     md = tmp_path / "Notes" / "cite-K1.md"
     md.parent.mkdir(parents=True)
     md.write_text("---\nzotero_key: \"OTHER\"\n---\n\n# Other\n", encoding="utf-8")
@@ -280,7 +225,7 @@ def test_commit_generation_owner_conflict_raises(tmp_path):
 
 
 def test_commit_generation_markdown_write_failure_rolls_back(tmp_path, monkeypatch):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     dest = tmp_path / "Notes" / "images" / "cite-K1"
     dest.mkdir(parents=True)
     (dest / "fig_1.png").write_bytes(b"OLD")
@@ -309,7 +254,7 @@ def test_commit_generation_markdown_write_failure_rolls_back(tmp_path, monkeypat
 
 
 def test_commit_generation_image_swap_failure_rolls_back(tmp_path, monkeypatch):
-    w = ObsidianWriter(str(tmp_path), "Notes")
+    w = ObsidianWriter(str(tmp_path / "Notes"))
     dest = tmp_path / "Notes" / "images" / "cite-K1"
     dest.mkdir(parents=True)
     (dest / "fig_1.png").write_bytes(b"OLD")
@@ -330,3 +275,33 @@ def test_commit_generation_image_swap_failure_rolls_back(tmp_path, monkeypatch):
     assert "新正文" not in content
     assert (dest / "fig_1.png").read_bytes() == b"OLD"  # 图片未切换
     assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
+
+
+def test_write_note_preserving_finds_note_moved_to_subfolder(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    moved = tmp_path / "Notes" / "主题" / "custom-name.md"
+    moved.parent.mkdir(parents=True)
+    moved.write_text(
+        '---\nzotero_key: "K1"\n---\n\n# Old\n\n## 我的笔记\n\n保留我写的内容\n\n## 疑问\n',
+        encoding="utf-8",
+    )
+
+    written = w.write_note_preserving(
+        "cite", '---\nzotero_key: "K1"\nnote_file: "cite-K1.md"\n---\n\n# New\n\n## 我的笔记\n\n## 疑问\n',
+        zotero_key="K1",
+    )
+
+    assert written == str(moved)
+    assert "保留我写的内容" in moved.read_text(encoding="utf-8")
+    assert not (tmp_path / "Notes" / "cite-K1.md").exists()
+
+
+def test_scan_states_rejects_duplicate_zotero_keys(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    for folder, name in (("A", "one.md"), ("B", "two.md")):
+        path = tmp_path / "Notes" / folder / name
+        path.parent.mkdir(parents=True)
+        path.write_text('---\nzotero_key: "K1"\n---\n', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="重复 Zotero 笔记"):
+        w.scan_states()

@@ -1,5 +1,5 @@
 """_clip_region 图表裁剪几何测试：fig 上探 / 高图 gap / table bbox / 兜底封顶 / Table→Figure 不跳过。"""
-from note_generator import _clip_region, CAPTION_RE, MIN_FIG_H
+from note_generator import _clip_region, _table_rects, CAPTION_RE, MIN_FIG_H
 
 
 class R:
@@ -11,6 +11,22 @@ class R:
 
 def cap(kind, y0, y1, num=1):
     return {"kind": kind, "num": num, "y0": y0, "y1": y1}
+
+
+def test_table_rects_uses_module_fitz_import():
+    class Table:
+        bbox = (10, 20, 300, 400)
+
+    class Finder:
+        tables = [Table()]
+
+    class Page:
+        def find_tables(self):
+            return Finder()
+
+    rects = _table_rects(Page())
+    assert len(rects) == 1
+    assert tuple(rects[0]) == (10.0, 20.0, 300.0, 400.0)
 
 
 # ---------- fig：caption 上方 ----------

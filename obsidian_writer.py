@@ -104,8 +104,8 @@ class NotePathConflict(Exception):
 
 
 class ObsidianWriter:
-    def __init__(self, vault_path: str, notes_folder: str):
-        self.notes_dir = os.path.join(vault_path, notes_folder) if vault_path else ""
+    def __init__(self, notes_path: str):
+        self.notes_dir = notes_path
 
     def _stem(self, citation_key: str, zotero_key: str | None = None) -> str:
         if zotero_key:
@@ -124,69 +124,60 @@ class ObsidianWriter:
         out: list[tuple[str, str, float]] = []
         if not os.path.isdir(self.notes_dir):
             return out
-        for name in os.listdir(self.notes_dir):
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(self.notes_dir, name)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                mtime = os.path.getmtime(path)
-            except OSError:
-                continue
-            m = FRONTMATTER_KEY_RE.search(content)
-            if not m:
-                continue
-            llm_body = content.split(MY_NOTES_HEADING, 1)[0]
-            if len(PLACEHOLDER_HITS_RE.findall(llm_body)) >= PLACEHOLDER_MIN_HITS:
-                state = "placeholder"
-            elif EVIDENCE_INSUFFICIENT_RE.search(content):
-                state = "insufficient"
-            elif EVIDENCE_ABSTRACT_RE.search(content):
-                state = "abstract_only"
-            else:
-                state = "ok"
-            out.append((m.group(1), state, mtime))
+        seen: dict[str, str] = {}
+        for root, dirs, names in os.walk(self.notes_dir):
+            dirs[:] = [d for d in dirs if d != "images"]
+            for name in names:
+                if not name.endswith(".md"):
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    continue
+                m = FRONTMATTER_KEY_RE.search(content)
+                if not m:
+                    continue
+                key = m.group(1)
+                if key in seen:
+                    raise RuntimeError(f"发现重复 Zotero 笔记：{seen[key]} 和 {path}")
+                seen[key] = path
+                llm_body = content.split(MY_NOTES_HEADING, 1)[0]
+                if len(PLACEHOLDER_HITS_RE.findall(llm_body)) >= PLACEHOLDER_MIN_HITS:
+                    state = "placeholder"
+                elif EVIDENCE_INSUFFICIENT_RE.search(content):
+                    state = "insufficient"
+                elif EVIDENCE_ABSTRACT_RE.search(content):
+                    state = "abstract_only"
+                else:
+                    state = "ok"
+                out.append((key, state, mtime))
         return out
 
     def _find_note_by_key(self, zotero_key: str) -> str | None:
         """按 frontmatter 里的 zotero_key 找已有笔记文件（支持用户在 Obsidian 里改名）。"""
         if not os.path.isdir(self.notes_dir):
             return None
-        for name in os.listdir(self.notes_dir):
-            if not name.endswith(".md"):
-                continue
-            path = os.path.join(self.notes_dir, name)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    head = f.read(2000)
-            except OSError:
-                continue
-            m = FRONTMATTER_KEY_RE.search(head)
-            if m and m.group(1) == zotero_key:
-                return path
-        return None
-
-    def existing_note_keys(self) -> set[str]:
-        """读取各笔记 frontmatter 中的 zotero_key，得到已生成笔记的 Zotero key 集合。
-        这样笔记文件即使被改名也能识别。"""
-        return {key for key, _flag, _mtime in self.scan_states()}
-
-    def insufficient_note_keys(self) -> set[str]:
-        """已生成但标记为「证据不足」的笔记 key 集合（需原文补充）。"""
-        return {key for key, flag, _mtime in self.scan_states() if flag == "insufficient"}
-
-    def abstract_note_keys(self) -> set[str]:
-        """仅依据摘要生成（evidence: abstract_only）的笔记 key 集合，与读全正文的笔记区分。"""
-        return {key for key, flag, _mtime in self.scan_states() if flag == "abstract_only"}
-
-    def placeholder_note_keys(self) -> set[str]:
-        """已生成但正文含占位符（修复轮产物）的笔记 key 集合，需重新生成。"""
-        return {key for key, flag, _mtime in self.scan_states() if flag == "placeholder"}
-
-    def note_mtimes(self) -> dict[str, float]:
-        """各笔记文件的最后修改时间。Obsidian 里编辑即更新，从未编辑过时即生成时间。"""
-        return {key: mtime for key, _flag, mtime in self.scan_states()}
+        found = None
+        for root, dirs, names in os.walk(self.notes_dir):
+            dirs[:] = [d for d in dirs if d != "images"]
+            for name in names:
+                if not name.endswith(".md"):
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        head = f.read(2000)
+                except OSError:
+                    continue
+                m = FRONTMATTER_KEY_RE.search(head)
+                if m and m.group(1) == zotero_key:
+                    if found:
+                        raise RuntimeError(f"发现重复 Zotero 笔记：{found} 和 {path}")
+                    found = path
+        return found
 
     @staticmethod
     def _atomic_write(path: str, content: str) -> None:
@@ -212,12 +203,6 @@ class ObsidianWriter:
                 return m.group(1) if m else None
         except OSError:
             return None
-
-    def write_note(self, citation_key: str, content: str, zotero_key: str | None = None) -> str:
-        os.makedirs(self.notes_dir, exist_ok=True)
-        path = self.note_path(citation_key, zotero_key)
-        self._atomic_write(path, content)
-        return path
 
     def _resolve_write_path(self, citation_key: str, zotero_key: str | None = None) -> str:
         """确定写入路径，归属校验 fail-closed。
@@ -295,19 +280,6 @@ class ObsidianWriter:
             raise
         if os.path.isdir(backup):
             shutil.rmtree(backup, ignore_errors=True)
-
-    def import_images(self, citation_key: str, figures: list[dict], zotero_key: str | None = None) -> list[str]:
-        """事务式导入图表（旧接口，供独立调用）：全部暂存成功才一次性并入正式目录。
-
-        返回缺失文件名列表；空 = 已提交。失败时正式目录不变。"""
-        if not figures:
-            return []
-        dest_dir = os.path.join(self.notes_dir, "images", self._stem(citation_key, zotero_key))
-        missing = self._stage_images(dest_dir, figures)
-        if missing:
-            return missing
-        self._swap_images(dest_dir, dest_dir + ".tmp")
-        return []
 
     def commit_generation(self, citation_key: str, content: str, figures: list[dict],
                           zotero_key: str | None = None) -> list[str]:

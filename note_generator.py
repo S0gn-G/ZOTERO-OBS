@@ -18,10 +18,11 @@ import re
 import shutil
 import tempfile
 
+import fitz
 from openai import OpenAI
 
 from config import BASE_DIR
-from obsidian_writer import note_stem, safe_citekey
+from obsidian_writer import note_stem
 
 PDF_MAX_CHARS = 30000  # 深度笔记需要更多证据
 
@@ -36,10 +37,13 @@ def _extract_pdf_text(pdf_path: str, max_chars: int = PDF_MAX_CHARS) -> str:
         import pdfplumber
 
         parts = []
+        total = 0
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                parts.append(page.extract_text() or "")
-                if sum(len(p) for p in parts) >= max_chars:
+                text = page.extract_text() or ""
+                parts.append(text)
+                total += len(text)
+                if total >= max_chars:
                     break
         return "\n".join(parts)[:max_chars]
     except Exception:
@@ -146,10 +150,6 @@ def _extract_figures(pdf_path: str, seed: str) -> list[dict]:
     暂存到临时目录。返回 [{name, page, caption, staging_path}]。无图注的页不提取。
     """
     if not pdf_path or not os.path.exists(pdf_path):
-        return []
-    try:
-        import fitz  # PyMuPDF
-    except ImportError:
         return []
     staging = tempfile.mkdtemp(prefix=f"zotnotes_fig_{seed}_")
     figs: list[dict] = []
@@ -305,7 +305,7 @@ def _add_evidence_line(content: str, value: str) -> str:
 # ---------------- 证据包（Stage 3） ----------------
 
 
-def _build_bundle(paper: dict, cfg: dict, pdf_text: str, figures: list[dict]) -> dict:
+def _build_bundle(paper: dict, pdf_text: str, figures: list[dict]) -> dict:
     fig_info = [
         {"file": f["name"], "page": f["page"], "caption": f["caption"]} for f in figures
     ]
@@ -338,7 +338,7 @@ def _client(cfg: dict) -> OpenAI:
 
 # 领域画像：config 里 llm_profile 可覆盖（空则用默认 SR/ReID 画像），
 # 使工具可服务任意研究领域，而不是写死某两个子方向。
-DEFAULT_DOMAIN_PROFILE = "你是一名图像超分辨率（SR）与行人重识别（ReID）领域的资深研究员"
+DEFAULT_DOMAIN_PROFILE = "你是一名严谨的学术研究者"
 
 
 def _domain_profile(cfg: dict) -> str:
@@ -639,7 +639,6 @@ FIX_SYSTEM = """你是论文笔记的审校专家。给定一份草稿笔记和�
 
 def llm_fix(body: str, issues: list[str], cfg: dict, bundle: dict | None = None) -> str:
     client = _client(cfg)
-    last_err = None
     for _ in range(2):  # 修复轮也可能输出过短骨架，重试一次
         try:
             user_content = "问题清单：\n" + "\n".join(f"- {i}" for i in issues) + "\n\n"
@@ -660,9 +659,8 @@ def llm_fix(body: str, issues: list[str], cfg: dict, bundle: dict | None = None)
             text = _strip_fences(resp.choices[0].message.content or body)
             if len(text) >= 300:
                 return text
-            last_err = ValueError(f"修复输出过短（{len(text)} 字符）")
-        except Exception as e:
-            last_err = e
+        except Exception:
+            pass
     # 修复失败保留原稿，由 generate_note 二次 lint 判定
     return body
 
@@ -670,7 +668,7 @@ def llm_fix(body: str, issues: list[str], cfg: dict, bundle: dict | None = None)
 # ---------------- 骨架笔记（fail-closed） ----------------
 
 
-def render_skeleton(paper: dict, cfg: dict, note_file: str, reason: str) -> str:
+def render_skeleton(paper: dict, note_file: str, reason: str) -> str:
     """无 PDF 正文且无摘要时生成骨架笔记：保留 frontmatter + 空分区骨架，标记证据不足。"""
     vals = _placeholder_vals(paper, note_file)
     body = [
@@ -709,31 +707,18 @@ def render_skeleton(paper: dict, cfg: dict, note_file: str, reason: str) -> str:
 # ---------------- 入口 ----------------
 
 
-def render_note(paper: dict, cfg: dict, note_file: str) -> str:
-    """无 LLM 时的简单模板渲染（占位符 + 空 LLM 区块）。generate_note 在 LLM 关闭时调用。"""
-    template = load_template(cfg)
-    return _substitute(template, paper, "", note_file)
-
-
 def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
     """多阶段深度笔记管道。返回：
     {"content": str, "figures": [figure_dict...], "status": "ok"|"abstract_only"|"needs_source"}
     文件名与图片目录统一用唯一 stem（<safe citekey>-<zotero key>），杜绝 citekey sanitize 碰撞。
-    LLM 关闭（cfg["llm_enabled"]=False）时按模板渲染，不调任何接口。
     LLM 调用失败时抛异常并清理暂存图表；成功后由调用方拷贝图表并调 cleanup_figures。
     """
     stem = note_stem(note_key, paper["key"])
     note_file = stem + ".md"
-    if not cfg.get("llm_enabled", True):
-        # LLM 关闭：无需 PDF 正文/图表，直接按模板渲染（占位符 + 空 LLM 区块）
-        return {"content": render_note(paper, cfg, note_file), "figures": [], "status": "ok"}
-
-    pdf_text = ""
+    pdf_text = _extract_pdf_text(paper.get("pdf_path"))
     figures: list[dict] = []
-    if cfg.get("use_pdf_text", True):
-        pdf_text = _extract_pdf_text(paper.get("pdf_path"))
-        if pdf_text:
-            figures = _extract_figures(paper.get("pdf_path"), stem)
+    if pdf_text:
+        figures = _extract_figures(paper.get("pdf_path"), stem)
 
     # 证据等级三级：fulltext（读全正文）/ abstract_only（仅摘要）/ none（无证据）
     abstract = (paper.get("abstract") or "").strip()
@@ -745,13 +730,13 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
         evidence = "none"
     if evidence == "none":
         content = render_skeleton(
-            paper, cfg, note_file,
+            paper, note_file,
             reason="PDF 正文不可读（扫描版或无 PDF）且库中无摘要",
         )
         return {"content": content, "figures": [], "status": "needs_source"}
 
     template = load_template(cfg)
-    bundle = _build_bundle(paper, cfg, pdf_text, figures)
+    bundle = _build_bundle(paper, pdf_text, figures)
     try:
         plan = llm_plan(bundle, cfg)
         body = llm_write(bundle, plan, cfg, stem)
@@ -762,10 +747,8 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
                 issues = lint_note(body, plan, figures, stem)  # 二次校验修复结果
             except Exception:
                 pass  # 修复调用失败保留原稿，按首次 lint 结果判定
-            fatal = [i for i in issues
-                     if "缺少必需章节" in i or "占位符" in i or "图表引用指向不存在的文件" in i]
-            if fatal:
-                raise ValueError("笔记校验未通过：" + "；".join(fatal))
+            if issues:
+                raise ValueError("笔记校验未通过：" + "；".join(issues))
     except Exception:
         cleanup_figures(figures)  # LLM 阶段失败：清掉暂存图表，避免残留
         raise

@@ -1,11 +1,11 @@
-"""程序内图标：用 Pillow 绘制简洁线性图标，返回 CTkImage。"""
+"""程序内图标：用 Pillow 绘制轻量线性图标，返回缓存的 CTkImage。"""
 import math
+from functools import lru_cache
 
 from PIL import Image, ImageDraw
 import customtkinter as ctk
 
 SIZE = 20
-COLOR = "#FFFFFF"
 
 
 def _base():
@@ -13,8 +13,8 @@ def _base():
     return img, ImageDraw.Draw(img)
 
 
-def _ctk(img):
-    return ctk.CTkImage(light_image=img, dark_image=img, size=(SIZE, SIZE))
+def _ctk(img, size=SIZE):
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
 
 
 def _pt(cx, cy, r, deg):
@@ -22,55 +22,62 @@ def _pt(cx, cy, r, deg):
     return (cx + r * math.cos(a), cy + r * math.sin(a))
 
 
-def settings():
-    """三条滑块 = 设置。"""
-    img, d = _base()
-    for y in (6, 10, 14):
-        d.line([(4, y), (16, y)], fill=COLOR, width=2)
-    d.ellipse([(12, 4), (16, 8)], fill=COLOR)
-    d.ellipse([(8, 8), (12, 12)], fill=COLOR)
-    d.ellipse([(13, 12), (17, 16)], fill=COLOR)
-    return _ctk(img)
-
-
-def template():
-    """文档 + 折角 + 文字行 = 模板。"""
-    img, d = _base()
-    d.rectangle([(5, 3), (15, 17)], outline=COLOR, width=2)
-    d.polygon([(12, 3), (12, 7), (15, 7)], fill=COLOR)
-    for y in (10, 13):
-        d.line([(7, y), (13, y)], fill=COLOR, width=1)
-    return _ctk(img)
-
-
-def refresh():
+@lru_cache(maxsize=None)
+def refresh(color="#FFFFFF"):
     """圆环 + 双箭头 = 刷新。"""
     img, d = _base()
     cx = cy = 10
-    d.arc([cx - 7, cy - 7, cx + 7, cy + 7], start=40, end=320, fill=COLOR, width=2)
+    d.arc([cx - 7, cy - 7, cx + 7, cy + 7], start=40, end=320, fill=color, width=2)
     # 缺口两端的箭头
     tip = _pt(cx, cy, 8, 320)
     b1 = _pt(cx, cy, 5.5, 320 - 30)
     b2 = _pt(cx, cy, 5.5, 320 + 30)
-    d.polygon([tip, b1, b2], fill=COLOR)
+    d.polygon([tip, b1, b2], fill=color)
     tip = _pt(cx, cy, 8, 40)
     b1 = _pt(cx, cy, 5.5, 40 - 30)
     b2 = _pt(cx, cy, 5.5, 40 + 30)
-    d.polygon([tip, b1, b2], fill=COLOR)
+    d.polygon([tip, b1, b2], fill=color)
     return _ctk(img)
 
 
-def play():
+@lru_cache(maxsize=None)
+def play(color="#FFFFFF"):
     """三角播放 = 生成。"""
     img, d = _base()
-    d.polygon([(6, 4), (6, 16), (16, 10)], fill=COLOR)
+    d.polygon([(6, 4), (6, 16), (16, 10)], fill=color)
     return _ctk(img)
 
 
-def pdf():
-    """小文档 = PDF。"""
+@lru_cache(maxsize=None)
+def search(color="#73847A"):
     img, d = _base()
-    d.rectangle([(5, 4), (15, 16)], outline=COLOR, width=2)
-    d.line([(7, 8), (13, 8)], fill=COLOR, width=1)
-    d.line([(7, 11), (13, 11)], fill=COLOR, width=1)
+    d.ellipse([(4, 4), (13, 13)], outline=color, width=2)
+    d.line([(12, 12), (17, 17)], fill=color, width=2)
+    return _ctk(img, 18)
+
+
+@lru_cache(maxsize=None)
+def book(color="#FFFFFF"):
+    img, d = _base()
+    d.rounded_rectangle([(3, 3), (17, 17)], radius=2, outline=color, width=2)
+    d.line([(7, 3), (7, 17)], fill=color, width=2)
+    d.line([(9, 7), (14, 7)], fill=color, width=1)
+    d.line([(9, 10), (14, 10)], fill=color, width=1)
     return _ctk(img)
+
+
+@lru_cache(maxsize=None)
+def file(color="#2F8F68"):
+    img, d = _base()
+    d.line([(5, 3), (13, 3), (16, 6), (16, 17), (5, 17), (5, 3)], fill=color, width=2)
+    d.line([(13, 3), (13, 7), (16, 7)], fill=color, width=2)
+    return _ctk(img, 18)
+
+
+@lru_cache(maxsize=None)
+def sliders(color="#2F8F68"):
+    img, d = _base()
+    for y, knob in ((5, 12), (10, 8), (15, 13)):
+        d.line([(3, y), (17, y)], fill=color, width=2)
+        d.ellipse([(knob - 2, y - 2), (knob + 2, y + 2)], fill=color)
+    return _ctk(img, 18)

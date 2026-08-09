@@ -1,8 +1,10 @@
-"""设置窗口：Zotero / Obsidian / LLM 配置。"""
+"""精简设置窗口：输出目录、模板与 LLM。"""
 import customtkinter as ctk
 from tkinter import filedialog
 
 from config import save_config
+from gui import design as ui
+from gui import icons
 
 
 class SettingsWindow(ctk.CTkToplevel):
@@ -10,99 +12,158 @@ class SettingsWindow(ctk.CTkToplevel):
         super().__init__(master)
         self.cfg = dict(cfg)
         self.on_saved = on_saved
-        self.title("设置")
-        self.geometry("600x560")
-        self.minsize(520, 420)
+        self.title("ZotNotes 设置")
+        self.geometry("720x700")
+        self.minsize(640, 620)
+        self.configure(fg_color=ui.APP_BG)
         self.transient(master)
         self.grab_set()
-
         self.entries = {}
-        # 滚动区：内容超出窗口高度时可上下滚动
-        body = ctk.CTkScrollableFrame(self, corner_radius=10)
-        body.pack(fill="both", expand=True, padx=16, pady=(16, 8))
 
-        # --- Zotero ---
-        self._section_label(body, "Zotero 本地 API")
-        self._entry(body, "zotero_base", "API 地址", cfg["zotero_base"], width=430)
+        content = ctk.CTkScrollableFrame(
+            self, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=ui.BORDER_STRONG,
+            scrollbar_button_hover_color=ui.ACCENT,
+        )
+        content.pack(fill="both", expand=True, padx=10, pady=(8, 0))
 
-        # --- Obsidian ---
-        self._section_label(body, "Obsidian 仓库")
-        self._entry(body, "vault_path", "Vault 路径", cfg["vault_path"], width=320, browse_dir=True)
-        self._entry(body, "notes_folder", "笔记文件夹", cfg["notes_folder"], width=320)
-        self._entry(body, "template_path", "模板文件", cfg["template_path"], width=320, browse_file=True)
+        heading = ctk.CTkFrame(content, fg_color="transparent")
+        heading.pack(fill="x", padx=16, pady=(12, 10))
+        badge = ctk.CTkFrame(heading, width=46, height=46, corner_radius=14, fg_color=ui.ACCENT_SOFT)
+        badge.pack(side="left", padx=(0, 12))
+        badge.pack_propagate(False)
+        ctk.CTkLabel(badge, text="", image=icons.sliders()).place(relx=.5, rely=.5, anchor="center")
+        heading_text = ctk.CTkFrame(heading, fg_color="transparent")
+        heading_text.pack(side="left")
         ctk.CTkLabel(
-            body, text="模板占位符：{{zotero:title}} {{zotero:authors}} {{zotero:year}} {{zotero:doi}} {{zotero:pdf}}\n{{zotero:llm}}（LLM 生成的深度笔记正文：核心信息/摘要翻译/创新点/方法/实验/局限），路径不存在会自动创建默认模板",
-            text_color="gray", justify="left", anchor="w", font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", pady=(0, 8))
+            heading_text, text="设置", anchor="w", text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=23, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            heading_text, text="只保留会直接影响笔记结果的选项",
+            anchor="w", text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        ).pack(anchor="w", pady=(1, 0))
 
-        # --- LLM ---
-        self._section_label(body, "LLM（OpenAI 兼容接口）")
-        self._entry(body, "llm_base_url", "Base URL", cfg["llm_base_url"], width=430)
-        self._entry(body, "llm_api_key", "API Key", cfg["llm_api_key"], width=430, show="*")
-        self._entry(body, "llm_model", "模型名", cfg["llm_model"], width=430)
+        output = self._card(content, "01", "笔记输出", "决定笔记与图片最终保存的位置")
+        self._entry(output, "notes_path", "输出文件夹", cfg["notes_path"], row=1, browse_dir=True)
+        self._entry(output, "template_path", "笔记模板", cfg["template_path"], row=2, browse_file=True)
+
+        model = self._card(content, "02", "模型与写作", "使用 OpenAI 兼容接口生成结构化论文笔记")
+        self._entry(model, "llm_base_url", "接口地址", cfg["llm_base_url"], row=1)
+        self._entry(model, "llm_api_key", "API Key", cfg["llm_api_key"], row=2, show="*", reveal=True)
+        self._entry(model, "llm_model", "模型", cfg["llm_model"], row=3)
 
         ctk.CTkLabel(
-            body, text="领域画像（空=默认 SR/ReID 研究员；可改成你的领域描述，如：你是一名计算机视觉研究员）",
-            text_color="gray", justify="left", anchor="w", font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", pady=(8, 2))
-        self.profile_box = ctk.CTkTextbox(body, height=52, wrap="word")
-        self.profile_box.pack(fill="x", pady=(0, 8))
+            model, text="研究领域 / 写作偏好", anchor="w", text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        ).grid(row=4, column=0, sticky="nw", padx=(18, 10), pady=(10, 4))
+        self.profile_box = ctk.CTkTextbox(
+            model, height=74, wrap="word", corner_radius=10,
+            border_width=1, border_color=ui.BORDER_STRONG,
+            fg_color=ui.SURFACE_ALT, text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=13),
+        )
+        self.profile_box.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(0, 18), pady=(10, 18))
         self.profile_box.insert("1.0", cfg.get("llm_profile") or "")
 
-        self.llm_var = ctk.BooleanVar(value=cfg.get("llm_enabled", True))
-        ctk.CTkCheckBox(body, text="启用 LLM 生成深度笔记", variable=self.llm_var).pack(anchor="w", pady=(0, 8))
-
-        self.overwrite_var = ctk.BooleanVar(value=cfg.get("overwrite", False))
-        ctk.CTkCheckBox(body, text="覆盖已生成的笔记", variable=self.overwrite_var).pack(anchor="w")
-
-        self.pdf_var = ctk.BooleanVar(value=cfg.get("only_with_pdf", True))
-        ctk.CTkCheckBox(body, text="仅显示含 PDF 的文献（隐藏视频/网页快照）", variable=self.pdf_var).pack(anchor="w", pady=(4, 0))
-
-        self.pdftext_var = ctk.BooleanVar(value=cfg.get("use_pdf_text", True))
-        ctk.CTkCheckBox(body, text="LLM 生成前读取 PDF 正文与图表（深度笔记，稍慢）", variable=self.pdftext_var).pack(anchor="w", pady=(0, 8))
-
-        # 底部固定操作栏（不随滚动区滚动，始终可见）
-        bottom = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        bottom.pack(fill="x", side="bottom", padx=16, pady=(0, 16))
-        ctk.CTkButton(bottom, text="保存", width=120, command=self._save).pack(side="left")
-
-    def _section_label(self, parent, text):
-        ctk.CTkLabel(parent, text=text, font=ctk.CTkFont(size=13, weight="bold")).pack(
-            anchor="w", pady=(10, 4)
+        bottom = ctk.CTkFrame(
+            self, height=70, corner_radius=0, fg_color=ui.SURFACE,
+            border_width=1, border_color=ui.BORDER,
         )
+        bottom.pack(fill="x", side="bottom")
+        ctk.CTkButton(
+            bottom, text="取消", width=96, height=38, corner_radius=10,
+            fg_color=ui.NEUTRAL_SOFT, hover_color=ui.SURFACE_HOVER,
+            text_color=ui.NEUTRAL_TEXT, command=self.destroy,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=13),
+        ).pack(side="right", padx=(8, 18), pady=14)
+        ctk.CTkButton(
+            bottom, text="保存设置", width=126, height=38, corner_radius=10,
+            fg_color=ui.ACCENT, hover_color=ui.ACCENT_HOVER,
+            command=self._save,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=13, weight="bold"),
+        ).pack(side="right", pady=14)
 
-    def _entry(self, parent, key, label, value, width, show=None, browse_dir=False, browse_file=False):
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", pady=3)
-        ctk.CTkLabel(row, text=label, width=110, anchor="w").pack(side="left")
-        e = ctk.CTkEntry(row, width=width, show=show)
-        e.pack(side="left", padx=(0, 6))
-        e.insert(0, value or "")
-        self.entries[key] = e
-        if browse_dir:
-            ctk.CTkButton(row, text="浏览…", width=64, command=lambda: self._browse_dir(key)).pack(side="left")
-        if browse_file:
-            ctk.CTkButton(row, text="浏览…", width=64, command=lambda: self._browse_file(key)).pack(side="left")
+    def _card(self, parent, number, title, description):
+        card = ctk.CTkFrame(
+            parent, corner_radius=15, fg_color=ui.SURFACE,
+            border_width=1, border_color=ui.BORDER,
+        )
+        card.pack(fill="x", padx=16, pady=8)
+        card.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            card, text=number, width=34, height=24, corner_radius=12,
+            fg_color=ui.ACCENT_SOFT, text_color=ui.ACCENT_TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=10, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(18, 10), pady=(15, 10))
+        title_box = ctk.CTkFrame(card, fg_color="transparent")
+        title_box.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(0, 18), pady=(12, 8))
+        ctk.CTkLabel(
+            title_box, text=title, anchor="w", text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=14, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            title_box, text=description, anchor="w", text_color=ui.TEXT_TERTIARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=10),
+        ).pack(anchor="w")
+        return card
+
+    def _entry(self, parent, key, label, value, row, show=None,
+               browse_dir=False, browse_file=False, reveal=False):
+        ctk.CTkLabel(
+            parent, text=label, anchor="w", width=116, text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        ).grid(row=row, column=0, sticky="w", padx=(18, 10), pady=6)
+        entry = ctk.CTkEntry(
+            parent, show=show, height=36, corner_radius=9,
+            border_color=ui.BORDER_STRONG, fg_color=ui.SURFACE_ALT,
+            text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=13),
+        )
+        entry.grid(row=row, column=1, sticky="ew", pady=6)
+        entry.insert(0, value or "")
+        self.entries[key] = entry
+
+        if browse_dir or browse_file:
+            command = (lambda: self._browse_dir(key)) if browse_dir else (lambda: self._browse_file(key))
+            ctk.CTkButton(
+                parent, text="选择", width=64, height=34, corner_radius=9,
+                fg_color=ui.ACCENT_SOFT, hover_color=ui.SURFACE_SELECTED,
+                text_color=ui.ACCENT_TEXT, command=command,
+            ).grid(row=row, column=2, padx=(8, 18), pady=6)
+        elif reveal:
+            ctk.CTkButton(
+                parent, text="显示", width=64, height=34, corner_radius=9,
+                fg_color=ui.ACCENT_SOFT, hover_color=ui.SURFACE_SELECTED,
+                text_color=ui.ACCENT_TEXT,
+                command=lambda: self._toggle_key(entry),
+            ).grid(row=row, column=2, padx=(8, 18), pady=6)
+        else:
+            ctk.CTkLabel(parent, text="", width=64).grid(row=row, column=2, padx=(8, 18))
+
+    @staticmethod
+    def _toggle_key(entry):
+        entry.configure(show="" if entry.cget("show") else "*")
 
     def _browse_dir(self, key):
-        path = filedialog.askdirectory(title="选择文件夹")
+        path = filedialog.askdirectory(title="选择笔记输出文件夹")
         if path:
             self.entries[key].delete(0, "end")
             self.entries[key].insert(0, path)
 
     def _browse_file(self, key):
-        path = filedialog.askopenfilename(title="选择模板文件", filetypes=[("Markdown", "*.md"), ("文本", "*.txt"), ("所有文件", "*.*")])
+        path = filedialog.askopenfilename(
+            title="选择模板文件",
+            filetypes=[("Markdown", "*.md"), ("文本", "*.txt"), ("所有文件", "*.*")],
+        )
         if path:
             self.entries[key].delete(0, "end")
             self.entries[key].insert(0, path)
 
     def _save(self):
-        for key, e in self.entries.items():
-            self.cfg[key] = e.get().strip()
-        self.cfg["llm_enabled"] = self.llm_var.get()
-        self.cfg["overwrite"] = self.overwrite_var.get()
-        self.cfg["only_with_pdf"] = self.pdf_var.get()
-        self.cfg["use_pdf_text"] = self.pdftext_var.get()
+        for key, entry in self.entries.items():
+            self.cfg[key] = entry.get().strip()
         self.cfg["llm_profile"] = self.profile_box.get("1.0", "end").strip()
         save_config(self.cfg)
         if self.on_saved:

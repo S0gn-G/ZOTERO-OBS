@@ -12,21 +12,22 @@ from tkinter import messagebox
 from config import load_config, save_config, CONFIG_PATH, resource_path
 from obsidian_writer import ObsidianWriter
 from note_generator import generate_note, load_template, default_template_path, cleanup_figures
-from zotero_client import ZoteroClient, ZoteroError
+from zotero_client import ZoteroClient
 from gui import icons
+from gui import design as ui
 from gui.settings_view import SettingsWindow
 
 MAX_WORKERS = 3  # 批量生成的并发数，兼顾速度与代理限速
 
-FONT_FAMILY = "Microsoft YaHei"
-GREEN = "#2F7D5C"
-GRAY = "#7E8780"
-RED = "#B4472F"
-AMBER = "#B07A2A"
-
-# 笔记状态：ok=已生成 / needs_source=证据不足待原文 / abstract_only=仅摘要 / placeholder=正文含占位符需修复 / none=未生成
-NOTE_STATE_LABEL = {"ok": "已生成", "needs_source": "需原文", "abstract_only": "仅摘要", "placeholder": "需修复", "none": "未生成"}
-NOTE_STATE_COLOR = {"ok": GREEN, "needs_source": AMBER, "abstract_only": AMBER, "placeholder": RED, "none": GRAY}
+ITEM_TYPE_LABEL = {
+    "journalArticle": "期刊论文",
+    "conferencePaper": "会议论文",
+    "preprint": "预印本",
+    "bookSection": "书籍章节",
+    "thesis": "学位论文",
+    "report": "报告",
+    "videoRecording": "视频",
+}
 
 
 def _fmt_mtime(ts: float) -> str:
@@ -36,51 +37,104 @@ def _fmt_mtime(ts: float) -> str:
 class PaperRow:
     """列表中的一行文献（卡片式）。"""
 
-    def __init__(self, parent, paper: dict, note_key: str, note_state: str, on_generate, on_open_pdf, updated_at=None):
+    def __init__(self, parent, paper: dict, note_key: str, note_state: str,
+                 on_generate, on_open_pdf, on_select, updated_at=None):
         self.paper = paper
         self.note_key = note_key
         self.note_state = note_state
         self.updated_at = updated_at
         self.frame = ctk.CTkFrame(
-            parent, corner_radius=8, border_width=1,
-            border_color=("#D5DAD5", "#39413D"), fg_color="transparent",
+            parent, corner_radius=15, border_width=1,
+            border_color=ui.BORDER, fg_color=ui.SURFACE,
         )
-        self.frame.pack(fill="x", pady=3, padx=2)
-        self.frame.bind("<Enter>", lambda e: self.frame.configure(fg_color=("#ECEFEC", "#2A322F")))
-        self.frame.bind("<Leave>", lambda e: self.frame.configure(fg_color="transparent"))
+        self.frame.pack(fill="x", pady=6, padx=2)
+        self.frame.grid_columnconfigure(2, weight=1)
+        self.frame.bind("<Enter>", lambda _e: self._hover(True))
+        self.frame.bind("<Leave>", lambda _e: self._hover(False))
 
-        self.check = ctk.CTkCheckBox(self.frame, width=28, text="")
-        self.check.pack(side="left", padx=(12, 6), pady=12)
+        self.accent = ctk.CTkFrame(
+            self.frame, width=4, height=50, corner_radius=2, fg_color="transparent"
+        )
+        self.accent.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 0), pady=14)
 
+        self.check = ctk.CTkCheckBox(
+            self.frame, width=24, text="",
+            command=lambda: self._selection_changed(on_select),
+        )
+        self.check.grid(row=0, column=1, rowspan=2, padx=(16, 12), pady=17)
+
+        title = ctk.CTkLabel(
+            self.frame, text=paper["title"], anchor="w", justify="left", wraplength=620,
+            text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=15, weight="bold"),
+        )
+        title.grid(row=0, column=2, sticky="ew", pady=(14, 2))
+
+        self._sub_base = "  ·  ".join(filter(None, [
+            ", ".join(paper["authors"][:3]) + (" 等" if len(paper["authors"]) > 3 else "")
+            if paper["authors"] else "",
+            paper["year"],
+        ]))
+        meta = ctk.CTkFrame(self.frame, fg_color="transparent")
+        meta.grid(row=1, column=2, sticky="ew", pady=(0, 14))
+        ctk.CTkLabel(
+            meta, text=ITEM_TYPE_LABEL.get(paper["itemType"], paper["itemType"]),
+            height=22, corner_radius=11, fg_color=ui.NEUTRAL_SOFT,
+            text_color=ui.NEUTRAL_TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+        ).pack(side="left", padx=(0, 8))
+        self.sub_label = ctk.CTkLabel(
+            meta, text=self._sub_text(), anchor="w", text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        )
+        self.sub_label.pack(side="left")
+
+        actions = ctk.CTkFrame(self.frame, fg_color="transparent")
+        actions.grid(row=0, column=3, rowspan=2, padx=(12, 10), pady=12)
+
+        label, bg, fg = ui.STATE_STYLE[note_state]
         self.status = ctk.CTkLabel(
-            self.frame, text=NOTE_STATE_LABEL[note_state], width=56,
-            fg_color=NOTE_STATE_COLOR[note_state],
-            text_color="white", corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            self.frame, text=label, width=64, height=26,
+            fg_color=bg, text_color=fg, corner_radius=13,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
         )
-        self.status.pack(side="right", padx=(4, 12), pady=12)
+        self.status.grid(row=0, column=4, rowspan=2, padx=(0, 16), pady=12)
 
         self.generate_btn = ctk.CTkButton(
-            self.frame, text="生成", width=68, height=28, image=icons.play(),
+            actions, text="重新生成" if note_state == "ok" else "生成笔记",
+            width=104, height=34, corner_radius=9, image=icons.play(),
+            fg_color=ui.ACCENT, hover_color=ui.ACCENT_HOVER,
             command=lambda: on_generate(paper["key"]),
         )
-        self.generate_btn.pack(side="right", padx=(0, 6), pady=12)
+        self.generate_btn.pack(side="right", padx=(6, 0))
 
         if paper.get("pdf_path"):
             ctk.CTkButton(
-                self.frame, text="PDF", width=58, height=28, image=icons.pdf(),
+                actions, text="PDF", width=60, height=34, corner_radius=9,
+                fg_color=ui.ACCENT_SOFT, hover_color=ui.SURFACE_SELECTED,
+                text_color=ui.ACCENT_TEXT,
                 command=lambda: on_open_pdf(paper["key"]),
-            ).pack(side="right", padx=(0, 6), pady=12)
+            ).pack(side="right")
 
-        suffix = {"ok": "  ✔", "needs_source": "  ⚠", "abstract_only": "  ⚠", "placeholder": "  ✗"}.get(note_state, "")
-        title = paper["title"] + suffix
-        ctk.CTkLabel(self.frame, text=title, anchor="w", justify="left",
-                     font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold")).pack(
-            side="top", anchor="w", padx=(0, 12), pady=(10, 0))
-        self._sub_base = " · ".join(filter(None, [", ".join(paper["authors"]) if paper["authors"] else "", paper["year"], paper["itemType"]]))
-        self.sub_label = ctk.CTkLabel(self.frame, text=self._sub_text(), anchor="w", text_color=("gray", "gray"),
-                                      font=ctk.CTkFont(family=FONT_FAMILY, size=12))
-        self.sub_label.pack(side="top", anchor="w", padx=(0, 12), pady=(0, 10))
+    def _hover(self, on: bool):
+        if not self.selected():
+            self.frame.configure(fg_color=ui.SURFACE_HOVER if on else ui.SURFACE)
+
+    def _selection_changed(self, on_select):
+        selected = self.selected()
+        self._apply_selection_style(selected)
+        on_select(self.paper["key"], selected)
+
+    def _apply_selection_style(self, selected: bool):
+        self.frame.configure(
+            fg_color=ui.SURFACE_SELECTED if selected else ui.SURFACE,
+            border_color=ui.ACCENT if selected else ui.BORDER,
+        )
+        self.accent.configure(fg_color=ui.ACCENT if selected else "transparent")
+
+    def set_selected(self, selected: bool):
+        self.check.select() if selected else self.check.deselect()
+        self._apply_selection_style(selected)
 
     def _sub_text(self) -> str:
         if self.updated_at:
@@ -95,28 +149,31 @@ class PaperRow:
         return bool(self.check.get())
 
     def mark_done(self):
-        self.note_state = "ok"
-        self.status.configure(text="已生成", fg_color=GREEN)
+        self._set_state("ok")
+        self.generate_btn.configure(text="重新生成")
         self.set_updated_at(_fmt_mtime(time.time()))
 
     def mark_needs_source(self):
-        self.note_state = "needs_source"
-        self.status.configure(text="需原文", fg_color=AMBER)
+        self._set_state("needs_source")
         self.set_updated_at(_fmt_mtime(time.time()))
 
     def mark_abstract_only(self):
-        self.note_state = "abstract_only"
-        self.status.configure(text="仅摘要", fg_color=AMBER)
+        self._set_state("abstract_only")
         self.set_updated_at(_fmt_mtime(time.time()))
+
+    def _set_state(self, state: str):
+        self.note_state = state
+        label, bg, fg = ui.STATE_STYLE[state]
+        self.status.configure(text=label, fg_color=bg, text_color=fg)
 
     def set_generating(self, on: bool):
         if on:
             self.generate_btn.configure(state="disabled", text="生成中…")
         else:
-            self.generate_btn.configure(state="normal", text="生成")
+            self.generate_btn.configure(state="normal", text="生成笔记")
 
     def mark_failed(self):
-        self.status.configure(text="失败", fg_color=RED)
+        self._set_state("failed")
         self.generate_btn.configure(state="normal", text="重试")
 
 
@@ -124,25 +181,37 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("ZotNotes · Zotero → Obsidian 论文笔记")
-        self.geometry("940x680")
-        self.minsize(760, 500)
+        self.geometry("1140x780")
+        self.minsize(920, 640)
+        self.configure(fg_color=ui.APP_BG)
 
         self.cfg = load_config()
         if not os.path.exists(CONFIG_PATH):
             save_config(self.cfg)  # 首次启动：落盘默认配置，用户可直接编辑
         load_template(self.cfg)  # 模板缺失时自动创建默认模板
         self.papers: list[dict] = []
+        self.paper_states: dict[str, tuple[str, float | None]] = {}
         self.rows: dict[str, PaperRow] = {}
-        self.writer = ObsidianWriter(self.cfg["vault_path"], self.cfg["notes_folder"])
+        self.writer = ObsidianWriter(self.cfg["notes_path"])
         self._busy = False
         self._generating = False
         self._destroyed = False
         self.generate_btn = None
         self.settings_btn = None
+        self.template_btn = None
+        self.refresh_btn = None
+        self.connection_label = None
+        self.generated_stat = None
+        self.pending_stat = None
+        self.attention_stat = None
+        self.selected_label = None
+        self.filter_var = ctk.StringVar(value="含 PDF")
+        self.select_all_var = ctk.BooleanVar(value=False)
         self._ui_queue = queue.Queue()
 
         self._set_window_icon()
         self._build_ui()
+        self.after(20, self.focus_set)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(200, self.refresh)
         self.after(50, self._poll_ui_queue)
@@ -181,40 +250,171 @@ class App(ctk.CTk):
 
     # ---------- UI ----------
     def _build_ui(self):
-        top = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        top.pack(fill="x", padx=14, pady=(12, 6))
-        self.settings_btn = ctk.CTkButton(top, text="设置", width=92, height=32, image=icons.settings(),
-                                          command=self.open_settings)
-        self.settings_btn.pack(side="left", padx=(0, 6))
-        ctk.CTkButton(top, text="模板", width=92, height=32, image=icons.template(),
-                      command=self.open_template).pack(side="left", padx=6)
-        ctk.CTkButton(top, text="刷新", width=92, height=32, image=icons.refresh(),
-                      command=self.refresh).pack(side="left", padx=6)
-        self.info_label = ctk.CTkLabel(top, text="", anchor="w",
-                                       font=ctk.CTkFont(family=FONT_FAMILY, size=13))
-        self.info_label.pack(side="left", padx=10)
+        header = ctk.CTkFrame(
+            self, corner_radius=18, fg_color=ui.SURFACE,
+            border_width=1, border_color=ui.BORDER,
+        )
+        header.pack(fill="x", padx=20, pady=(18, 12))
+        header.grid_columnconfigure(0, weight=1)
 
-        head = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        head.pack(fill="x", padx=18)
-        ctk.CTkLabel(head, text="论文", anchor="w", text_color=("gray", "gray"),
-                     font=ctk.CTkFont(family=FONT_FAMILY, size=12)).pack(side="left")
-        ctk.CTkLabel(head, text="操作 / 状态", anchor="e", text_color=("gray", "gray"),
-                     font=ctk.CTkFont(family=FONT_FAMILY, size=12)).pack(side="right")
+        brand = ctk.CTkFrame(header, fg_color="transparent")
+        brand.grid(row=0, column=0, sticky="w", padx=18, pady=14)
+        logo = ctk.CTkFrame(brand, width=48, height=48, corner_radius=14, fg_color=ui.ACCENT)
+        logo.pack(side="left", padx=(0, 12))
+        logo.pack_propagate(False)
+        ctk.CTkLabel(logo, text="", image=icons.book()).place(relx=.5, rely=.5, anchor="center")
+        brand_text = ctk.CTkFrame(brand, fg_color="transparent")
+        brand_text.pack(side="left")
+        ctk.CTkLabel(
+            brand_text, text="ZotNotes", anchor="w", text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=23, weight="bold"),
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            brand_text, text="Zotero → Obsidian 研究工作台",
+            text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        ).pack(anchor="w", pady=(1, 0))
 
-        self.list_frame = ctk.CTkScrollableFrame(self, corner_radius=10)
-        self.list_frame.pack(fill="both", expand=True, padx=12, pady=8)
+        actions = ctk.CTkFrame(header, fg_color="transparent")
+        actions.grid(row=0, column=1, padx=16, pady=14)
+        connection = ctk.CTkFrame(actions, corner_radius=15, fg_color=ui.NEUTRAL_SOFT)
+        connection.pack(side="left", padx=(0, 10))
+        self.connection_dot = ctk.CTkLabel(
+            connection, text="●", width=16, text_color=ui.TEXT_TERTIARY,
+            font=ctk.CTkFont(size=10),
+        )
+        self.connection_dot.pack(side="left", padx=(9, 0), pady=5)
+        self.connection_label = ctk.CTkLabel(
+            connection, text="正在同步", text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+        )
+        self.connection_label.pack(side="left", padx=(2, 10), pady=5)
+        secondary = dict(
+            fg_color=ui.ACCENT_SOFT, hover_color=ui.SURFACE_SELECTED,
+            text_color=ui.ACCENT_TEXT, corner_radius=9,
+        )
+        self.template_btn = ctk.CTkButton(
+            actions, text="模板", width=82, height=36, image=icons.file(),
+            command=self.open_template, **secondary,
+        )
+        self.template_btn.pack(side="left", padx=4)
+        self.settings_btn = ctk.CTkButton(
+            actions, text="设置", width=82, height=36, image=icons.sliders(),
+            command=self.open_settings, **secondary,
+        )
+        self.settings_btn.pack(side="left", padx=4)
+        self.refresh_btn = ctk.CTkButton(
+            actions, text="刷新", width=88, height=36, corner_radius=9,
+            fg_color=ui.ACCENT, hover_color=ui.ACCENT_HOVER,
+            image=icons.refresh(), command=self.refresh,
+        )
+        self.refresh_btn.pack(side="left", padx=(4, 0))
 
-        bottom = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        bottom.pack(fill="x", side="bottom", padx=14, pady=(4, 12))
-        self.generate_btn = ctk.CTkButton(bottom, text="生成勾选的笔记", width=178, height=36,
-                                          image=icons.play(), command=self.generate)
-        self.generate_btn.pack(side="left", padx=(0, 12))
-        self.progress = ctk.CTkProgressBar(bottom, width=400)
+        toolbar = ctk.CTkFrame(
+            self, corner_radius=15, fg_color=ui.SURFACE,
+            border_width=1, border_color=ui.BORDER,
+        )
+        toolbar.pack(fill="x", padx=20, pady=(0, 12))
+        toolbar.grid_columnconfigure(0, weight=1)
+
+        search_box = ctk.CTkFrame(
+            toolbar, height=40, corner_radius=11, fg_color=ui.SURFACE_ALT,
+            border_width=1, border_color=ui.BORDER_STRONG,
+        )
+        search_box.grid(row=0, column=0, sticky="ew", padx=(14, 12), pady=12)
+        search_box.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(search_box, text="", image=icons.search()).grid(
+            row=0, column=0, padx=(12, 4), pady=2
+        )
+        self.search_entry = ctk.CTkEntry(
+            search_box, height=36, border_width=0, fg_color="transparent",
+            placeholder_text="搜索标题、作者或年份…",
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=13),
+        )
+        self.search_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=2)
+        self.search_entry.bind("<KeyRelease>", lambda _event: self._filter_changed())
+        self.filter_control = ctk.CTkSegmentedButton(
+            toolbar, values=["含 PDF", "全部", "未生成", "需处理"],
+            variable=self.filter_var, command=lambda _value: self._filter_changed(),
+            height=36, corner_radius=9,
+            selected_color=ui.ACCENT, selected_hover_color=ui.ACCENT_HOVER,
+            unselected_color=ui.NEUTRAL_SOFT, unselected_hover_color=ui.SURFACE_HOVER,
+            text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        )
+        self.filter_control.grid(row=0, column=1, padx=(0, 14), pady=12)
+
+        summary = ctk.CTkFrame(self, fg_color="transparent")
+        summary.pack(fill="x", padx=26, pady=(0, 4))
+        ctk.CTkLabel(
+            summary, text="论文库", anchor="w", text_color=ui.TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=16, weight="bold"),
+        ).pack(side="left")
+        self.info_label = ctk.CTkLabel(
+            summary, text="", anchor="w", text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        )
+        self.info_label.pack(side="left", padx=(10, 0))
+        self.attention_stat = ctk.CTkLabel(
+            summary, text="需处理 0", height=26, corner_radius=13,
+            fg_color=ui.WARNING_SOFT, text_color=ui.WARNING_TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+        )
+        self.attention_stat.pack(side="right", padx=(8, 0))
+        self.pending_stat = ctk.CTkLabel(
+            summary, text="未生成 0", height=26, corner_radius=13,
+            fg_color=ui.NEUTRAL_SOFT, text_color=ui.NEUTRAL_TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+        )
+        self.pending_stat.pack(side="right", padx=(8, 0))
+        self.generated_stat = ctk.CTkLabel(
+            summary, text="已生成 0", height=26, corner_radius=13,
+            fg_color=ui.ACCENT_SOFT, text_color=ui.ACCENT_TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+        )
+        self.generated_stat.pack(side="right")
+
+        self.list_frame = ctk.CTkScrollableFrame(
+            self, corner_radius=16, fg_color=ui.SURFACE_ALT,
+            border_width=1, border_color=ui.BORDER,
+        )
+        self.list_frame.pack(fill="both", expand=True, padx=20, pady=(6, 10))
+
+        bottom = ctk.CTkFrame(
+            self, corner_radius=16, fg_color=ui.SURFACE,
+            border_width=1, border_color=ui.BORDER,
+        )
+        bottom.pack(fill="x", side="bottom", padx=20, pady=(0, 18))
+        bottom.grid_columnconfigure(2, weight=1)
+        self.select_all = ctk.CTkCheckBox(
+            bottom, text="全选当前列表", variable=self.select_all_var,
+            command=self._toggle_select_all,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=12),
+        )
+        self.select_all.grid(row=0, column=0, padx=(16, 10), pady=14)
+        self.selected_label = ctk.CTkLabel(
+            bottom, text="已选 0 篇", text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+        )
+        self.selected_label.grid(row=0, column=1, padx=(0, 12), pady=14)
+        self.progress = ctk.CTkProgressBar(
+            bottom, height=5, progress_color=ui.ACCENT,
+            fg_color=ui.NEUTRAL_SOFT,
+        )
         self.progress.set(0)
-        self.progress.pack(side="left", padx=10)
-        self.status_label = ctk.CTkLabel(bottom, text="就绪", anchor="w",
-                                         font=ctk.CTkFont(family=FONT_FAMILY, size=12))
-        self.status_label.pack(side="left", padx=10, expand=True)
+        self.progress.grid(row=0, column=2, sticky="ew", padx=12, pady=14)
+        self.progress.grid_remove()
+        self.status_label = ctk.CTkLabel(
+            bottom, text="就绪", anchor="e", width=150, text_color=ui.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+        )
+        self.status_label.grid(row=0, column=3, padx=(8, 12), pady=14)
+        self.generate_btn = ctk.CTkButton(
+            bottom, text="生成所选笔记", width=150, height=40, corner_radius=10,
+            image=icons.play(), fg_color=ui.ACCENT, hover_color=ui.ACCENT_HOVER,
+            command=self.generate, state="disabled",
+        )
+        self.generate_btn.grid(row=0, column=4, padx=(0, 14), pady=10)
 
     def _set_info(self, text):
         self.info_label.configure(text=text)
@@ -227,46 +427,126 @@ class App(ctk.CTk):
         state = "disabled" if busy else "normal"
         for row in self.rows.values():
             row.generate_btn.configure(state=state)
-        if self.generate_btn:
-            self.generate_btn.configure(state=state)
-        if self.settings_btn:
-            self.settings_btn.configure(state=state)
+            row.check.configure(state=state)
+        for widget in (self.generate_btn, self.settings_btn, self.template_btn, self.refresh_btn):
+            if widget:
+                widget.configure(state=state)
+        for widget in (getattr(self, "search_entry", None), getattr(self, "filter_control", None),
+                       getattr(self, "select_all", None)):
+            if widget:
+                widget.configure(state=state)
+        if not busy:
+            self._update_selection_status()
 
-    def _refresh_info(self, states=None):
-        """更新顶部信息行。传 states 则复用（刷新路径），否则重扫一次（生成后计数）。"""
-        if states is None:
-            states = self.writer.scan_states()
-        done = sum(1 for _k, s, _m in states if s == "ok")
-        need = sum(1 for _k, s, _m in states if s == "insufficient")
-        bad = sum(1 for _k, s, _m in states if s == "placeholder")
-        abstract = sum(1 for _k, s, _m in states if s == "abstract_only")
-        info = f"{len(self.papers)} 篇文献 · {done} 篇已生成"
-        if abstract:
-            info += f" · {abstract} 篇仅摘要"
-        if bad:
-            info += f" · {bad} 篇需修复"
-        if need:
-            info += f" · {need} 篇需原文"
-        self._set_info(info)
+    def _filter_changed(self):
+        self.select_all_var.set(False)
+        self._render_rows()
+        self._refresh_info()
+        self._update_selection_status()
+
+    def _toggle_select_all(self):
+        selected = self.select_all_var.get()
+        for row in self.rows.values():
+            row.set_selected(selected)
+        self._update_selection_status()
+
+    def _on_row_selected(self, _key: str, _selected: bool):
+        self.select_all_var.set(bool(self.rows) and all(r.selected() for r in self.rows.values()))
+        self._update_selection_status()
+
+    def _update_selection_status(self):
+        count = sum(1 for row in self.rows.values() if row.selected())
+        self.selected_label.configure(text=f"已选 {count} 篇")
+        self.generate_btn.configure(text=f"生成 {count} 篇笔记" if count else "生成所选笔记")
+        if not self._busy:
+            self.generate_btn.configure(
+                state="normal" if count else "disabled",
+                fg_color=ui.ACCENT if count else ui.NEUTRAL_SOFT,
+                text_color="#FFFFFF" if count else ui.TEXT_TERTIARY,
+            )
+
+    def _paper_state(self, key: str) -> tuple[str, float | None]:
+        return self.paper_states.get(key, ("none", None))
+
+    def _filtered_papers(self) -> list[dict]:
+        query = self.search_entry.get().strip().lower()
+        mode = self.filter_var.get()
+        out = []
+        for paper in self.papers:
+            state, _mtime = self._paper_state(paper["key"])
+            haystack = " ".join([
+                paper["title"], " ".join(paper["authors"]), paper["year"], paper["itemType"]
+            ]).lower()
+            if query and query not in haystack:
+                continue
+            if mode == "含 PDF" and not paper.get("pdf_path"):
+                continue
+            if mode == "未生成" and state != "none":
+                continue
+            if mode == "需处理" and state not in ("needs_source", "abstract_only", "placeholder", "failed"):
+                continue
+            out.append(paper)
+        return out
+
+    def _render_rows(self):
+        if not hasattr(self, "list_frame"):
+            return
+        for child in self.list_frame.winfo_children():
+            child.destroy()
+        self.rows.clear()
+        papers = self._filtered_papers()
+        if not papers:
+            ctk.CTkLabel(
+                self.list_frame,
+                text="没有符合条件的论文\n\n可以调整搜索词或筛选条件",
+                text_color=ui.TEXT_SECONDARY,
+                font=ctk.CTkFont(family=ui.FONT_FAMILY, size=14),
+                justify="center",
+            ).pack(pady=80)
+            return
+        for paper in papers:
+            state, mtime = self._paper_state(paper["key"])
+            updated = _fmt_mtime(mtime) if mtime else None
+            row = PaperRow(
+                self.list_frame, paper, paper["citationKey"], state,
+                on_generate=self.generate_one, on_open_pdf=self.open_pdf,
+                on_select=self._on_row_selected, updated_at=updated,
+            )
+            self.rows[paper["key"]] = row
+
+    def _refresh_info(self, _states=None):
+        """从当前内存状态更新视图统计，不重复扫描磁盘。"""
+        visible = len(self._filtered_papers())
+        states = [self._paper_state(p["key"])[0] for p in self.papers]
+        done = states.count("ok")
+        pending = states.count("none")
+        attention = sum(s in ("needs_source", "abstract_only", "placeholder", "failed") for s in states)
+        self._set_info(f"显示 {visible} / {len(self.papers)} 篇")
+        self.generated_stat.configure(text=f"已生成 {done}")
+        self.pending_stat.configure(text=f"未生成 {pending}")
+        self.attention_stat.configure(text=f"需处理 {attention}")
 
     # ---------- 数据 ----------
     def refresh(self):
         if self._busy:
             return
+        self._set_busy(True)
         self._set_status("正在读取 Zotero…")
+        self.connection_dot.configure(text_color=ui.WARNING_TEXT)
+        self.connection_label.configure(text="正在同步", text_color=ui.WARNING_TEXT)
         self.progress.configure(mode="indeterminate")
+        self.progress.grid()
         self.progress.start()
-        threading.Thread(target=self._refresh_worker, daemon=True).start()
+        writer = ObsidianWriter(self.cfg["notes_path"])
+        threading.Thread(target=self._refresh_worker, args=(writer,), daemon=True).start()
 
-    def _refresh_worker(self):
+    def _refresh_worker(self, writer):
         try:
-            client = ZoteroClient(self.cfg["zotero_base"])
+            client = ZoteroClient()
             papers = client.fetch_papers()
-            if self.cfg.get("only_with_pdf", True):
-                papers = [p for p in papers if p.get("pdf_path")]
             for p in papers:
                 p["citationKey"] = p["citationKey"] or ZoteroClient.fallback_citation_key(p)
-            states = self.writer.scan_states()  # 单次扫描，各状态集合都由它派生
+            states = writer.scan_states()
             result = (papers, states)
             self._post(lambda: self._apply_refresh(result))
         except Exception as e:
@@ -276,51 +556,46 @@ class App(ctk.CTk):
     def _apply_refresh(self, result):
         papers, states = result
         self.papers = papers
+        self.paper_states = {
+            key: ({"insufficient": "needs_source"}.get(state, state), mtime)
+            for key, state, mtime in states
+        }
         self.progress.stop()
         self.progress.configure(mode="determinate")
-        for child in self.list_frame.winfo_children():
-            child.destroy()
-        self.rows.clear()
-        note_keys = {k for k, _s, _m in states}
-        insufficient = {k for k, s, _m in states if s == "insufficient"}
-        placeholders = {k for k, s, _m in states if s == "placeholder"}
-        abstract = {k for k, s, _m in states if s == "abstract_only"}
-        mtimes = {k: m for k, _s, m in states}
+        self.progress.grid_remove()
         if not papers:
+            for child in self.list_frame.winfo_children():
+                child.destroy()
+            self.rows.clear()
             ctk.CTkLabel(
                 self.list_frame,
-                text="没有可显示的文献\n\n请确认 Zotero 已运行并开启本地 API；\n或在 设置 里调整「仅显示含 PDF 的文献」",
-                text_color=("gray", "gray"),
-                font=ctk.CTkFont(family=FONT_FAMILY, size=14),
+                text="Zotero 中还没有文献\n\n请确认 Zotero 已运行并开启本地 API",
+                text_color=ui.TEXT_SECONDARY,
+                font=ctk.CTkFont(family=ui.FONT_FAMILY, size=14),
                 justify="center",
             ).pack(pady=80)
             self._refresh_info(states)
             self._set_status("库中没有文献")
+            self.connection_dot.configure(text_color=ui.ACCENT)
+            self.connection_label.configure(text="Zotero 已连接", text_color=ui.ACCENT_TEXT)
+            self._set_busy(False)
             return
-        for p in papers:
-            if p["key"] in placeholders:
-                state = "placeholder"
-            elif p["key"] in insufficient:
-                state = "needs_source"
-            elif p["key"] in abstract:
-                state = "abstract_only"
-            elif p["key"] in note_keys:
-                state = "ok"
-            else:
-                state = "none"
-            updated = _fmt_mtime(mtimes[p["key"]]) if p["key"] in mtimes else None
-            row = PaperRow(self.list_frame, p, p["citationKey"], state,
-                           on_generate=self.generate_one, on_open_pdf=self.open_pdf,
-                           updated_at=updated)
-            self.rows[p["key"]] = row
+        self._render_rows()
         self._refresh_info(states)
         self._set_status(f"已加载 {len(papers)} 篇")
+        self.connection_dot.configure(text_color=ui.ACCENT)
+        self.connection_label.configure(text="Zotero 已连接", text_color=ui.ACCENT_TEXT)
+        self._set_busy(False)
 
     def _show_error(self, msg):
         self.progress.stop()
         self.progress.configure(mode="determinate")
+        self.progress.grid_remove()
+        self._set_busy(False)
         self._set_status(msg)
         self._set_info("⚠ " + msg)
+        self.connection_dot.configure(text_color=ui.DANGER_TEXT)
+        self.connection_label.configure(text="连接失败", text_color=ui.DANGER_TEXT)
 
     # ---------- 单篇生成 ----------
     def generate_one(self, key: str):
@@ -329,16 +604,16 @@ class App(ctk.CTk):
         row = self.rows.get(key)
         if not row:
             return
-        if not self.cfg["vault_path"]:
-            self._set_status("请先在 设置 里填写 Obsidian Vault 路径")
+        if not self.cfg["notes_path"]:
+            self._set_status("请先在设置里选择笔记输出文件夹")
             return
-        if row.note_state == "ok" and not self.cfg["overwrite"]:
-            self._set_status("该篇已有笔记，如需覆盖请在 设置 中开启「覆盖已生成的笔记」")
-            return
-        if self.cfg["llm_enabled"] and not self.cfg["llm_api_key"]:
-            self._set_status("LLM 已启用但未填 API Key（在 设置 里填写，或关闭 LLM）")
+        if not self.cfg["llm_api_key"]:
+            self._set_status("请先在设置里填写 API Key")
             return
         cfg = dict(self.cfg)  # 快照：生成期间改设置不影响本次
+        self.progress.configure(mode="indeterminate")
+        self.progress.grid()
+        self.progress.start()
         self._set_busy(True)
         row.set_generating(True)
         self._generating = True
@@ -366,18 +641,25 @@ class App(ctk.CTk):
         self._post(lambda: self._finish_one(row, ok, status, err))
 
     def _finish_one(self, row, ok, status, err):
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.progress.grid_remove()
         row.set_generating(False)
         if ok and status == "needs_source":
             row.mark_needs_source()
+            self.paper_states[row.paper["key"]] = ("needs_source", time.time())
             self._set_status(f"已生成骨架（证据不足）：{row.paper['title'][:40]}")
         elif ok and status == "abstract_only":
             row.mark_abstract_only()
+            self.paper_states[row.paper["key"]] = ("abstract_only", time.time())
             self._set_status(f"已生成（仅摘要）：{row.paper['title'][:40]}")
         elif ok:
             row.mark_done()
+            self.paper_states[row.paper["key"]] = ("ok", time.time())
             self._set_status(f"已生成：{row.paper['title'][:40]}")
         else:
             row.mark_failed()
+            self.paper_states[row.paper["key"]] = ("failed", None)
             self._set_status(f"生成失败：{err}")
         self._refresh_info()
         self._generating = False
@@ -391,30 +673,29 @@ class App(ctk.CTk):
         if not selected:
             self._set_status("请先勾选至少一篇文献")
             return
-        if not self.cfg["vault_path"]:
-            self._set_status("请先在 设置 里填写 Obsidian Vault 路径")
+        if not self.cfg["notes_path"]:
+            self._set_status("请先在设置里选择笔记输出文件夹")
             return
-        if self.cfg["llm_enabled"] and not self.cfg["llm_api_key"]:
-            self._set_status("LLM 已启用但未填 API Key（在 设置 里填写，或关闭 LLM）")
+        if not self.cfg["llm_api_key"]:
+            self._set_status("请先在设置里填写 API Key")
             return
         cfg = dict(self.cfg)  # 快照：批量生成期间改设置不影响本次
-        overwrite = cfg["overwrite"]
-        to_process = [r for r in selected if overwrite or r.note_state != "ok"]
-        skips = [r for r in selected if r.note_state == "ok" and not overwrite]
-        self._set_status(f"正在生成 {len(to_process)} 篇（跳过 {len(skips)} 篇已有笔记）…")
+        self._set_status(f"正在生成 {len(selected)} 篇…")
+        self.progress.configure(mode="determinate")
+        self.progress.grid()
         self.progress.set(0)
         self._set_busy(True)
         self._generating = True
         threading.Thread(
             target=self._generate_worker,
-            args=(to_process, skips, cfg),
+            args=(selected, cfg),
             daemon=True,
         ).start()
 
-    def _generate_worker(self, rows, skips, cfg):
-        writer = ObsidianWriter(cfg["vault_path"], cfg["notes_folder"])
+    def _generate_worker(self, rows, cfg):
+        writer = ObsidianWriter(cfg["notes_path"])
         total = len(rows)
-        results = [(r.paper["key"], "ok", "跳过（已有笔记）") for r in skips]
+        results = []
         if not rows:
             self._post(lambda: self._finish_generate(results))
             return
@@ -434,28 +715,36 @@ class App(ctk.CTk):
         ok = sum(1 for _, s, r in results if s == "ok" and r == "OK")
         need = sum(1 for _, s, r in results if s == "needs_source")
         abstract = sum(1 for _, s, r in results if s == "abstract_only")
+        failed = sum(1 for _, s, _r in results if s == "failed")
         for key, s, r in results:
             row = self.rows.get(key)
             if not row:
                 continue
             if s == "ok" and r == "OK":
                 row.mark_done()
+                self.paper_states[key] = ("ok", time.time())
             elif s == "needs_source":
                 row.mark_needs_source()
+                self.paper_states[key] = ("needs_source", time.time())
             elif s == "abstract_only":
                 row.mark_abstract_only()
-            elif r != "跳过（已有笔记）":
+                self.paper_states[key] = ("abstract_only", time.time())
+            else:
                 row.mark_failed()
+                self.paper_states[key] = ("failed", None)
         self._refresh_info()
         self._generating = False
         self._set_busy(False)
         self.progress.set(1.0)
-        suffix = ""
+        self.progress.grid_remove()
+        parts = [f"完整 {ok}"]
         if need:
-            suffix += f"，{need} 篇需原文"
+            parts.append(f"需原文 {need}")
         if abstract:
-            suffix += f"，{abstract} 篇仅摘要"
-        self._set_status(f"完成：成功 {ok}/{len(results)}{suffix}")
+            parts.append(f"仅摘要 {abstract}")
+        if failed:
+            parts.append(f"失败 {failed}")
+        self._set_status("完成 · " + " · ".join(parts))
 
     # ---------- PDF ----------
     def open_pdf(self, key: str):
@@ -487,6 +776,6 @@ class App(ctk.CTk):
 
     def _on_settings_saved(self, cfg):
         self.cfg = cfg
-        self.writer = ObsidianWriter(cfg["vault_path"], cfg["notes_folder"])
+        self.writer = ObsidianWriter(cfg["notes_path"])
         self._set_status("设置已保存")
         self.refresh()

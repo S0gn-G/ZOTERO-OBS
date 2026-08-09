@@ -1,12 +1,12 @@
 """Zotero 本地 HTTP API 客户端：拉取文献列表、解析 PDF 路径、解析引文键。"""
 import re
 import urllib.parse
-from datetime import datetime
 
 import requests
 
 PAGE_SIZE = 100   # Zotero API 单页上限
 MAX_ITEMS = 20000  # 安全上限，防服务端异常时死循环
+DEFAULT_BASE_URL = "http://127.0.0.1:23119/api/"
 
 
 class ZoteroError(Exception):
@@ -25,11 +25,8 @@ def _clean_author_name(s: str) -> str:
 
 
 class ZoteroClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str = DEFAULT_BASE_URL):
         self.base = base_url.rstrip("/")
-
-    def _get(self, path: str):
-        return self._get_resp(path).json()
 
     def _get_resp(self, path: str) -> requests.Response:
         """发 GET 并校验状态码，返回 Response（分页需要读 Total-Results 头）。"""
@@ -78,10 +75,6 @@ class ZoteroClient:
         return papers
 
     @staticmethod
-    def _find_pdf(it, att_by_parent) -> dict | None:
-        return att_by_parent.get(it["key"])
-
-    @staticmethod
     def _pdf_path(att) -> str | None:
         if not att:
             return None
@@ -103,7 +96,7 @@ class ZoteroClient:
             for c in creators
             if c.get("lastName") or c.get("firstName")
         ]
-        att = self._find_pdf(it, att_by_parent)
+        att = att_by_parent.get(it["key"])
         return {
             "key": it["key"],
             "itemType": d.get("itemType", ""),
