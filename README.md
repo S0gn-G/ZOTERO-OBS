@@ -10,21 +10,22 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 
 1. Windows 10/11。
 2. Zotero 7 正在运行，并允许本机其他程序通信。
-3. 一个用于保存论文笔记的文件夹，可以是 Obsidian vault 内的任意目录。
+3. 一个用于保存论文笔记的文件夹，可以手动选择，也可以从 Obsidian 已登记的 Vault 中自动接入；写入时不要求 Obsidian 正在运行。
 4. OpenAI 兼容接口的 Base URL、API Key 和模型名。
 5. Better BibTeX 可选；没有 citekey 时程序会生成稳定的兜底名称。
 
 ## 快速开始
 
 1. 下载并运行 `ZotNotes.exe`，或按下文说明从源码启动。
-2. 打开“设置”：
-   - 选择最终的笔记输出文件夹；
+2. 可以点击顶栏“自动接入”，由程序寻找正在运行的 Zotero 和本机有效的 Obsidian Vault；只有一个 Vault 时直接接入其 `LiteratureNotes`，多个 Vault 时在专用窗口中选择一个。也可以跳过此按钮，继续手动选择输出文件夹。
+3. 打开“设置”：
+   - 确认自动接入的笔记目录，或手动选择最终输出文件夹；
    - 模板通常保持默认；
    - 填写模型接口地址、API Key 和模型名；
    - “研究领域 / 写作偏好”可留空。
-3. 保存设置并刷新 Zotero 文献。
-4. 搜索或筛选文献，单篇生成，或勾选当前列表后批量生成。
-5. 已生成的文献可以直接重新生成；`## 我的笔记` 和 `## 疑问` 两个手写区会被保留。
+4. 保存设置并刷新 Zotero 文献。
+5. 搜索或筛选文献，单篇生成，或勾选当前列表后批量生成。
+6. 已生成的文献可以直接重新生成；`## 我的笔记` 和 `## 疑问` 两个手写区会被保留。
 
 主界面提供以下视图：
 
@@ -37,7 +38,7 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 
 “全选当前列表”只选择当前搜索与筛选结果。“PDF”按钮使用系统默认阅读器打开附件。批量生成最多并发处理 3 篇文献。
 
-界面提供日间与夜间模式，可通过顶栏按钮即时切换并在下次启动时恢复。日间模式使用白色页面、黑色主操作和浅灰辅助面；夜间模式使用深灰页面、浅色主操作与相同的小面积语义状态色。论文列表整行共享同一悬停状态；鼠标经过标题、状态、空白处或操作按钮时不会反复闪烁。搜索输入会在短暂停顿后统一刷新，并复用已经创建的论文行，避免连续输入时重复重建整张列表。批量任务失败时，界面会在汇总状态之外直接显示首个具体错误，便于定位问题。
+“自动接入”是显式操作：程序启动时不会自动读取 Obsidian 注册文件，也不会替用户切换笔记目录；只有点击按钮后才运行发现插件。界面还提供日间与夜间模式，可通过顶栏按钮即时切换并在下次启动时恢复。日间模式使用白色页面、黑色主操作和浅灰辅助面；夜间模式使用深灰页面、浅色主操作与相同的小面积语义状态色。论文列表整行共享同一悬停状态；鼠标经过标题、状态、空白处或操作按钮时不会反复闪烁。搜索输入会在短暂停顿后统一刷新，并复用已经创建的论文行，避免连续输入时重复重建整张列表。批量任务失败时，界面会在汇总状态之外直接显示首个具体错误，便于定位问题。
 
 ## 状态含义
 
@@ -65,7 +66,7 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 
 此外，程序会在配置文件中保存一项界面状态 `appearance_mode`，值为 `light` 或 `dark`。它只记录顶栏日间/夜间按钮的当前选择，不是设置页中的新增选项。
 
-Zotero 地址固定为 `http://127.0.0.1:23119/api/`；文献存在 PDF 时始终读取正文，不提供额外高级开关。
+Zotero 地址固定为 `http://127.0.0.1:23119/api/`；“自动接入”只对该标准本地 API 发出一个小型探测请求，不读取完整文献库。Obsidian provider 只读取 `%APPDATA%\obsidian\obsidian.json` 中已登记且仍存在的 Vault；发现阶段不创建目录。文献存在 PDF 时始终读取正文，不提供额外高级开关。
 
 配置保存在源码目录或 `ZotNotes.exe` 同目录的 `config.json`。文件结构与 `config.example.json` 一致：
 
@@ -122,6 +123,7 @@ Zotero 本地 API
 | 笔记 | `notes_path/<论文标题>.md`；同名冲突时追加 Zotero key，也可由用户改名或移入子目录 |
 | 图片 | `notes_path/images/<safe-citekey>-<zotero-key>/` |
 | 主题与图标 | `theme.json`、`icon.ico`；打包时内置，同目录文件可覆盖 |
+| Obsidian Vault 注册信息 | `%APPDATA%\obsidian\obsidian.json`；仅在点击“自动接入”后读取 |
 | Zotero 数据源 | `http://127.0.0.1:23119/api/` |
 | LLM | 设置中的 `llm_base_url` |
 
@@ -142,6 +144,12 @@ flowchart TB
     ENTRY["main.py<br/>程序入口"] --> APP
     SETTINGS["gui/settings_view.py<br/>六项用户设置"] --> APP
     VISUAL["gui/design.py + gui/icons.py<br/>视觉系统"] --> APP
+    AUTOCONNECT["自动接入按钮"] --> DISCOVERY["discovery/core.py<br/>Provider 契约与结果聚合"]
+    DISCOVERY --> ZPROVIDER["discovery/zotero.py<br/>Zotero API 探测"]
+    DISCOVERY --> OPROVIDER["discovery/obsidian.py<br/>Obsidian Vault 发现"]
+    OPROVIDER --> OBSREG["obsidian.json"]
+    DISCOVERY --> VAULTUI["gui/vault_selection.py<br/>多 Vault 选择"]
+    VAULTUI --> APP
 
     CFGFILE["config.json"] <--> CONFIG["config.py<br/>迁移与原子保存"]
     CONFIG -->|"读取 / 保存"| APP
@@ -157,12 +165,12 @@ flowchart TB
     classDef storage fill:#F7FAF8,stroke:#8AA697,color:#263A30,stroke-width:1px;
 
     class ZOTERO,PDF,LLM source;
-    class ENTRY,APP,SETTINGS,VISUAL,WORKERS ui;
-    class ZCLIENT,GENERATOR,WRITER,CONFIG core;
-    class CFGFILE,THEME,TEMPLATE,NOTES storage;
+    class ENTRY,APP,SETTINGS,VISUAL,WORKERS,AUTOCONNECT,VAULTUI ui;
+    class ZCLIENT,GENERATOR,WRITER,CONFIG,DISCOVERY,ZPROVIDER,OPROVIDER core;
+    class CFGFILE,THEME,TEMPLATE,NOTES,OBSREG storage;
 ```
 
-界面层只负责交互和任务编排；核心服务分别处理配置、Zotero、生成与写入。生成内容必须通过校验后才交给写入层，Markdown 与图片作为同一事务提交。
+界面层只负责交互和任务编排；发现层通过统一 provider 契约隔离 Zotero 探测与 Obsidian 注册格式，新增发现来源时只需实现并注册 provider。核心服务分别处理配置、Zotero、生成与写入。生成内容必须通过校验后才交给写入层，Markdown 与图片作为同一事务提交。
 
 | 模块 | 职责 |
 |---|---|
@@ -171,14 +179,31 @@ flowchart TB
 | `zotero_client.py` | Zotero 分页读取、元数据标准化与 PDF 路径解析 |
 | `note_generator.py` | PDF/图表提取、模型调用、校验与模板渲染 |
 | `obsidian_writer.py` | 笔记定位、手写区保留与整体事务提交 |
+| `discovery/` | 自动发现契约、聚合器及 Zotero/Obsidian providers |
 | `gui/app.py` | 主界面、筛选、单篇和批量任务 |
 | `gui/settings_view.py` | 六项用户设置编辑 |
+| `gui/vault_selection.py` | 多个 Obsidian Vault 的专用选择窗口 |
 | `gui/design.py` | 颜色、字体、层级和状态样式 |
 | `gui/icons.py` | 轻量界面图标 |
 | `tests/` | 自动回归测试 |
 | `ZotNotes.spec` | 单文件 Windows 打包配置 |
 
-刷新在工作线程中分页读取 Zotero，同时递归扫描输出目录中的 Markdown；搜索和四种视图仅在本地改变显示。所有 Tk 控件更新经 UI 队列回到主线程，设置、刷新与生成不会同时执行状态性操作。
+刷新在工作线程中分页读取 Zotero，同时递归扫描输出目录中的 Markdown；搜索和四种视图仅在本地改变显示。自动发现同样在工作线程执行，但只由“自动接入”按钮触发，结果经 UI 队列回到主线程；多 Vault 的选择和配置保存都发生在用户确认之后。设置、刷新、发现与生成不会同时执行状态性操作。
+
+### 自动接入设计约束
+
+自动接入只维护以下必要不变量，不增加配置项、管理页面或通用“安全框架”：
+
+| 环节 | 当前规则 |
+|---|---|
+| Vault 注册数据 | 只接受存在的绝对目录；规范化后去重；注册文件的编码或 JSON 错误作为 Obsidian 发现结果显示，不影响 Zotero 探测 |
+| Zotero 探测 | 本地 API 必须返回 HTTP 200 和 JSON 列表，空列表也表示连接可用 |
+| 配置提交 | 先原子保存新配置，成功后再切换内存配置与 writer；失败时保持原连接并显示原因 |
+| UI 任务队列 | 单个回调异常后仍继续轮询，后续刷新或生成结果不会滞留 |
+| 多 Vault 选择 | 窗口使用独立行号标识候选，同名或重复 provider identity 不会串选 |
+| 窗口尺寸 | 主窗口和 Vault 选择器根据逻辑屏幕尺寸收缩，常见 125% 缩放小屏仍能访问底部操作栏 |
+
+实现中没有引入 UNC 探测线程、目录写权限预检、全局 `except Exception` 或高级设置；这些机制会增加状态与代码量，却不属于当前功能边界。
 
 ## 源码运行与测试
 
@@ -212,6 +237,8 @@ python -m PyInstaller --clean --noconfirm ZotNotes.spec
 ## 常见问题
 
 - 刷新失败：确认 Zotero 已启动并允许本机其他程序通信。
+- 自动接入找不到 Obsidian：先在 Obsidian 中打开过目标 Vault，并确认该目录仍然存在；也可以继续在设置中手动选择输出文件夹。
+- 检测到多个 Obsidian Vault：在选择窗口中根据名称和完整路径选定一个；取消不会改变现有配置。
 - 搜不到无 PDF 文献：切换为“全部”。
 - 显示“需原文”：PDF 可能是扫描件或附件路径无效；补充可提取文本的 PDF 后重新生成。
 - 生成失败：查看界面底部信息，确认模型地址、API Key 和网络后重试。

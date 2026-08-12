@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import customtkinter as ctk
 
 from config import BASE_DIR, load_config, resource_path
+from discovery import default_discovery_service
 
 
 def main():
@@ -24,7 +25,7 @@ def main():
         ctk.set_appearance_mode(cfg["appearance_mode"])
         ctk.set_default_color_theme(resource_path("theme.json"))
         from gui.app import App
-        app = App(cfg)
+        app = App(cfg, discovery_service=default_discovery_service())
         app.mainloop()
     except Exception:
         import traceback

@@ -10,12 +10,19 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 from config import load_config, save_config, CONFIG_PATH, resource_path
+from discovery.core import (
+    DiscoveryCandidate,
+    DiscoveryKind,
+    DiscoveryReport,
+    notes_path_for_vault,
+)
 from obsidian_writer import ObsidianWriter
 from note_generator import generate_note, load_template, default_template_path, cleanup_figures
-from zotero_client import ZoteroClient
+from zotero_client import DEFAULT_BASE_URL, ZoteroClient
 from gui import icons
 from gui import design as ui
 from gui.settings_view import SettingsWindow
+from gui.vault_selection import VaultSelectionDialog
 
 MAX_WORKERS = 3  # 批量生成的并发数，兼顾速度与代理限速
 
@@ -230,14 +237,15 @@ class PaperRow:
 
 
 class App(ctk.CTk):
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, discovery_service=None):
         super().__init__()
         self.title("ZotNotes · Zotero → Obsidian 论文笔记")
-        self.geometry("1220x820")
-        self.minsize(980, 660)
+        ui.fit_window(self, (1220, 820), (900, 560), (64, 80))
         self.configure(fg_color=ui.APP_BG)
 
         self.cfg = dict(cfg) if cfg is not None else load_config()
+        self.discovery_service = discovery_service
+        self.zotero_base_url = DEFAULT_BASE_URL
         if not os.path.exists(CONFIG_PATH):
             save_config(self.cfg)  # 首次启动：落盘默认配置，用户可直接编辑
         load_template(self.cfg)  # 模板缺失时自动创建默认模板
@@ -255,6 +263,7 @@ class App(ctk.CTk):
         self.generate_btn = None
         self.settings_btn = None
         self.template_btn = None
+        self.auto_connect_btn = None
         self.theme_btn = None
         self.refresh_btn = None
         self.connection_label = None
@@ -303,7 +312,9 @@ class App(ctk.CTk):
                 fn()
         except queue.Empty:
             pass
-        self.after(50, self._poll_ui_queue)
+        finally:
+            if not self._destroyed:
+                self.after(50, self._poll_ui_queue)
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -353,6 +364,13 @@ class App(ctk.CTk):
             text_color=ui.TEXT, border_width=1, border_color=ui.BORDER_STRONG,
             corner_radius=8,
         )
+        self.auto_connect_btn = ctk.CTkButton(
+            actions, text="自动接入", width=94, height=36,
+            command=self.auto_connect,
+            state="normal" if self.discovery_service is not None else "disabled",
+            **secondary,
+        )
+        self.auto_connect_btn.pack(side="left", padx=4)
         self.theme_btn = ctk.CTkButton(
             actions, width=80, height=36,
             command=self._toggle_appearance, **secondary,
@@ -523,9 +541,14 @@ class App(ctk.CTk):
         for row in self.rows.values():
             row.generate_btn.configure(state=state)
             row.check.configure(state=state)
-        for widget in (self.generate_btn, self.settings_btn, self.template_btn, self.refresh_btn):
+        for widget in (
+            self.generate_btn, self.settings_btn, self.template_btn,
+            self.auto_connect_btn, self.refresh_btn,
+        ):
             if widget:
                 widget.configure(state=state)
+        if self.auto_connect_btn and self.discovery_service is None:
+            self.auto_connect_btn.configure(state="disabled")
         for widget in (getattr(self, "search_entry", None), getattr(self, "filter_control", None),
                        getattr(self, "select_all", None)):
             if widget:
@@ -581,6 +604,95 @@ class App(ctk.CTk):
                 fg_color=ui.ACCENT if count else ui.NEUTRAL_SOFT,
                 text_color=ui.ON_ACCENT if count else ui.TEXT_TERTIARY,
             )
+
+    def auto_connect(self):
+        """只在用户明确点击后运行发现插件。"""
+        if self._busy or self.discovery_service is None:
+            return
+        self._set_busy(True)
+        self._set_status("正在寻找 Zotero 与 Obsidian…")
+        threading.Thread(target=self._discovery_worker, daemon=True).start()
+
+    def _discovery_worker(self):
+        try:
+            report = self.discovery_service.discover()
+            self._post(lambda: self._apply_auto_discovery(report))
+        except Exception as exc:
+            message = str(exc)
+            self._post(lambda: self._show_discovery_error(message))
+
+    def _show_discovery_error(self, message: str):
+        self._set_busy(False)
+        self._set_status(f"自动接入失败：{message}")
+
+    def _apply_auto_discovery(self, report: DiscoveryReport):
+        zotero_candidates = report.candidates_for(DiscoveryKind.ZOTERO_API)
+        vault_candidates = report.candidates_for(DiscoveryKind.OBSIDIAN_VAULT)
+        zotero = zotero_candidates[0] if zotero_candidates else None
+
+        if len(vault_candidates) > 1:
+            self._set_status(f"检测到 {len(vault_candidates)} 个 Obsidian 仓库，请选择")
+            VaultSelectionDialog(
+                self,
+                vault_candidates,
+                on_selected=lambda vault: self._complete_auto_connect(vault, zotero, report),
+                on_cancel=self._cancel_auto_connect,
+            )
+            return
+
+        vault = vault_candidates[0] if vault_candidates else None
+        self._complete_auto_connect(vault, zotero, report)
+
+    def _cancel_auto_connect(self):
+        self._set_busy(False)
+        self._set_status("已取消自动接入")
+
+    def _complete_auto_connect(
+        self,
+        vault: DiscoveryCandidate | None,
+        zotero: DiscoveryCandidate | None,
+        report: DiscoveryReport,
+    ):
+        if vault is not None:
+            notes_path = notes_path_for_vault(vault)
+            next_cfg = {**self.cfg, "notes_path": notes_path}
+            try:
+                save_config(next_cfg)
+            except OSError as exc:
+                self._show_discovery_error(f"无法保存设置：{exc}")
+                return
+            self.cfg = next_cfg
+            self.writer = ObsidianWriter(notes_path)
+
+        self._set_busy(False)
+        obsidian_failure = next(
+            (item.message for item in report.failures
+             if item.kind == DiscoveryKind.OBSIDIAN_VAULT),
+            None,
+        )
+
+        if zotero is not None:
+            self.zotero_base_url = zotero.value
+            if vault is not None:
+                status = f"已自动接入 Zotero 与 {vault.label}"
+            elif obsidian_failure:
+                status = f"已连接 Zotero；{obsidian_failure}"
+            else:
+                status = "已连接 Zotero；未发现有效的 Obsidian 仓库"
+            self.refresh(status)
+            return
+
+        self.connection_dot.configure(text_color=ui.DANGER_TEXT)
+        self.connection_label.configure(text="未检测到 Zotero", text_color=ui.DANGER_TEXT)
+        failure = next(
+            (item.message for item in report.failures if item.kind == DiscoveryKind.ZOTERO_API),
+            "未检测到正在运行的 Zotero",
+        )
+        if vault is not None:
+            self._set_status(f"已接入 {vault.label}；{failure}")
+        else:
+            vault_status = obsidian_failure or "未发现可接入的 Obsidian 仓库"
+            self._set_status(f"{vault_status}；{failure}")
 
     def _toggle_appearance(self):
         mode = "dark" if self.cfg["appearance_mode"] == "light" else "light"
@@ -686,7 +798,7 @@ class App(ctk.CTk):
         self.attention_stat.configure(text=f"需处理 {attention}")
 
     # ---------- 数据 ----------
-    def refresh(self):
+    def refresh(self, success_status: str | None = None):
         if self._busy:
             return
         self._set_busy(True)
@@ -697,23 +809,27 @@ class App(ctk.CTk):
         self.progress.grid()
         self.progress.start()
         writer = ObsidianWriter(self.cfg["notes_path"])
-        threading.Thread(target=self._refresh_worker, args=(writer,), daemon=True).start()
+        threading.Thread(
+            target=self._refresh_worker,
+            args=(writer, self.zotero_base_url, success_status),
+            daemon=True,
+        ).start()
 
-    def _refresh_worker(self, writer):
+    def _refresh_worker(self, writer, base_url, success_status):
         try:
-            client = ZoteroClient()
+            client = ZoteroClient(base_url)
             papers = client.fetch_papers()
             for p in papers:
                 p["citationKey"] = p["citationKey"] or ZoteroClient.fallback_citation_key(p)
             states = writer.scan_states()
-            result = (papers, states)
+            result = (papers, states, success_status)
             self._post(lambda: self._apply_refresh(result))
         except Exception as e:
             err = str(e)
             self._post(lambda err=err: self._show_error(f"读取失败：{err}"))
 
     def _apply_refresh(self, result):
-        papers, states = result
+        papers, states, success_status = result
         self._clear_rows()
         self.papers = papers
         self.paper_states = {
@@ -733,7 +849,9 @@ class App(ctk.CTk):
             )
             self._empty_label.pack(pady=80)
             self._refresh_info(0)
-            self._set_status("库中没有文献")
+            self._set_status(
+                f"{success_status}；库中没有文献" if success_status else "库中没有文献"
+            )
             self.connection_dot.configure(text_color=ui.SUCCESS_TEXT)
             self.connection_label.configure(text="Zotero 已连接", text_color=ui.SUCCESS_TEXT)
             self._set_busy(False)
@@ -741,7 +859,8 @@ class App(ctk.CTk):
         visible = self._filtered_papers()
         self._render_rows(visible)
         self._refresh_info(len(visible))
-        self._set_status(f"已加载 {len(papers)} 篇")
+        loaded = f"已加载 {len(papers)} 篇"
+        self._set_status(f"{success_status}；{loaded}" if success_status else loaded)
         self.connection_dot.configure(text_color=ui.SUCCESS_TEXT)
         self.connection_label.configure(text="Zotero 已连接", text_color=ui.SUCCESS_TEXT)
         self._set_busy(False)

@@ -49,13 +49,15 @@ def load_config() -> dict:
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
+            if not isinstance(saved, dict):
+                saved = {}
             # v0.1 配置迁移：Vault + 子目录只在这里合并一次。
             if not saved.get("notes_path") and saved.get("vault_path"):
                 saved["notes_path"] = os.path.join(
                     saved["vault_path"], saved.get("notes_folder", "LiteratureNotes")
                 )
             cfg.update({k: v for k, v in saved.items() if k in DEFAULT_CONFIG})
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeError, OSError):
             pass
     if cfg["appearance_mode"] not in ("light", "dark"):
         cfg["appearance_mode"] = "light"
@@ -64,7 +66,11 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        payload = {key: cfg.get(key, default) for key, default in DEFAULT_CONFIG.items()}
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, CONFIG_PATH)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            payload = {key: cfg.get(key, default) for key, default in DEFAULT_CONFIG.items()}
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_PATH)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)

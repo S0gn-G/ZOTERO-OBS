@@ -41,3 +41,13 @@ STATE_STYLE = {
     "failed": ("失败", DANGER_SOFT, DANGER_TEXT),
     "none": ("未生成", NEUTRAL_SOFT, NEUTRAL_TEXT),
 }
+
+
+def fit_window(window, preferred, minimum, margin):
+    """按当前 DPI 后的逻辑屏幕限制窗口尺寸。"""
+    screen_w = int(window._reverse_window_scaling(window.winfo_screenwidth()))
+    screen_h = int(window._reverse_window_scaling(window.winfo_screenheight()))
+    width = min(preferred[0], max(1, screen_w - margin[0]))
+    height = min(preferred[1], max(1, screen_h - margin[1]))
+    window.geometry(f"{width}x{height}")
+    window.minsize(min(minimum[0], width), min(minimum[1], height))
