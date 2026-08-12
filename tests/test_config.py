@@ -19,8 +19,32 @@ def test_load_config_migrates_old_vault_and_drops_removed_keys(tmp_path, monkeyp
 
     assert cfg["notes_path"] == os.path.join("D:/Vault", "Papers")
     assert cfg["llm_model"] == "model-x"
+    assert cfg["appearance_mode"] == "light"
     assert "overwrite" not in cfg
     assert "vault_path" not in cfg
+
+
+def test_load_config_invalid_appearance_mode_falls_back_to_light(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"appearance_mode": "sepia"}), encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_PATH", str(path))
+
+    cfg = config.load_config()
+
+    assert cfg["appearance_mode"] == "light"
+
+
+def test_dark_appearance_mode_round_trips(tmp_path, monkeypatch):
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(config, "CONFIG_PATH", str(path))
+    cfg = dict(config.DEFAULT_CONFIG)
+    cfg["appearance_mode"] = "dark"
+
+    config.save_config(cfg)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["appearance_mode"] == "dark"
+    assert config.load_config()["appearance_mode"] == "dark"
 
 
 def test_save_config_persists_only_current_settings(tmp_path, monkeypatch):

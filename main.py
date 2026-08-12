@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import customtkinter as ctk
 
-from config import BASE_DIR, resource_path
+from config import BASE_DIR, load_config, resource_path
 
 
 def main():
@@ -20,10 +20,11 @@ def main():
     except Exception:
         pass
     try:
-        ctk.set_appearance_mode("system")
+        cfg = load_config()
+        ctk.set_appearance_mode(cfg["appearance_mode"])
         ctk.set_default_color_theme(resource_path("theme.json"))
         from gui.app import App
-        app = App()
+        app = App(cfg)
         app.mainloop()
     except Exception:
         import traceback

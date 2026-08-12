@@ -40,7 +40,7 @@ def _clean_body():
     )
 
 
-def _fake_plan(bundle, cfg):
+def _fake_plan(bundle, cfg, client):
     return {
         "paper_type": "method", "figures_to_reference": [],
         "required_sections": [], "mechanism_flow": [], "key_numbers": [],
@@ -70,6 +70,36 @@ def test_write_system_inserts_profile_without_formatting_formula_example():
     assert "{profile}" not in prompt
 
 
+def test_pdf_text_cache_reuses_unchanged_file(tmp_path, monkeypatch):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"pdf")
+    calls = []
+
+    class Page:
+        def extract_text(self):
+            calls.append("extract")
+            return "paper text"
+
+    class FakePDF:
+        pages = [Page()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr("pdfplumber.open", lambda _path: FakePDF())
+    ng._extract_pdf_text_cached.cache_clear()
+
+    assert ng._extract_pdf_text(str(pdf)) == "paper text"
+    assert ng._extract_pdf_text(str(pdf)) == "paper text"
+    assert calls == ["extract"]
+    pdf.write_bytes(b"updated pdf")
+    assert ng._extract_pdf_text(str(pdf)) == "paper text"
+    assert calls == ["extract", "extract"]
+
+
 def test_evidence_none_skeleton(monkeypatch):
     monkeypatch.setattr(ng, "_extract_pdf_text", _no_text)
     paper = _paper()
@@ -82,7 +112,7 @@ def test_evidence_none_skeleton(monkeypatch):
 def test_evidence_abstract_only(monkeypatch):
     monkeypatch.setattr(ng, "_extract_pdf_text", _no_text)
     monkeypatch.setattr(ng, "llm_plan", _fake_plan)
-    monkeypatch.setattr(ng, "llm_write", lambda b, p, c, k: _clean_body())
+    monkeypatch.setattr(ng, "llm_write", lambda b, p, c, k, client: _clean_body())
     paper = _paper(abstract="Some abstract text about the method.")
     result = ng.generate_note(paper, _cfg(), note_key="cite")
     assert result["status"] == "abstract_only"
@@ -93,7 +123,7 @@ def test_evidence_fulltext(monkeypatch):
     monkeypatch.setattr(ng, "_extract_pdf_text", lambda p, max_chars=30000: "real full text " * 500)
     monkeypatch.setattr(ng, "_extract_figures", lambda p, k: [])
     monkeypatch.setattr(ng, "llm_plan", _fake_plan)
-    monkeypatch.setattr(ng, "llm_write", lambda b, p, c, k: _clean_body())
+    monkeypatch.setattr(ng, "llm_write", lambda b, p, c, k, client: _clean_body())
     paper = _paper(pdf_path="C:/x.pdf", abstract="has abstract")
     result = ng.generate_note(paper, _cfg(), note_key="cite")
     assert result["status"] == "ok"
@@ -109,7 +139,7 @@ def test_llm_failure_cleans_figures(monkeypatch):
     monkeypatch.setattr(ng, "_extract_pdf_text", lambda p, max_chars=30000: "text " * 100)
     monkeypatch.setattr(ng, "_extract_figures", lambda p, k: [fig])
 
-    def boom(bundle, cfg):
+    def boom(bundle, cfg, client):
         raise RuntimeError("llm down")
 
     monkeypatch.setattr(ng, "llm_plan", boom)
@@ -134,12 +164,12 @@ def test_special_char_citekey_canonical_refs_pass_lint(monkeypatch):
     monkeypatch.setattr(ng, "_extract_pdf_text", lambda p, max_chars=30000: "text " * 100)
     monkeypatch.setattr(ng, "_extract_figures", lambda p, k: [fig])
 
-    def plan_fn(bundle, cfg):
-        p = _fake_plan(bundle, cfg)
+    def plan_fn(bundle, cfg, client):
+        p = _fake_plan(bundle, cfg, client)
         p["figures_to_reference"] = ["fig_1_p1.png"]
         return p
 
-    def write_fn(bundle, plan, cfg, image_dir):
+    def write_fn(bundle, plan, cfg, image_dir, client):
         assert image_dir == "Wang_Li_2022-K1"  # 唯一 stem 贯通到 llm_write
         return _clean_body() + f"\n![图](images/{image_dir}/fig_1_p1.png)\n"
 
@@ -152,3 +182,39 @@ def test_special_char_citekey_canonical_refs_pass_lint(monkeypatch):
     assert result["figures"] == [fig]
     ng.cleanup_figures(result["figures"])
     assert not os.path.exists(staging)  # 调用方拷图后清理暂存
+
+
+def test_deterministic_finalize_skips_fix_and_reuses_client(monkeypatch):
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    client = FakeClient()
+    seen = []
+    monkeypatch.setattr(ng, "_extract_pdf_text", lambda p, max_chars=30000: "text " * 100)
+    monkeypatch.setattr(ng, "_extract_figures", lambda p, k: [])
+    monkeypatch.setattr(ng, "_client", lambda cfg: client)
+
+    def plan_fn(bundle, cfg, received):
+        seen.append(received)
+        return _fake_plan(bundle, cfg, received)
+
+    def write_fn(bundle, plan, cfg, image_dir, received):
+        seen.append(received)
+        return _clean_body().replace("## 原文摘要翻译\n\n摘要", "## 原文摘要翻译\n\n待补充")
+
+    monkeypatch.setattr(ng, "llm_plan", plan_fn)
+    monkeypatch.setattr(ng, "llm_write", write_fn)
+    monkeypatch.setattr(
+        ng, "llm_fix",
+        lambda *_args: pytest.fail("确定性问题不应触发额外 LLM 修复"),
+    )
+
+    result = ng.generate_note(_paper(pdf_path="C:/x.pdf"), _cfg(), note_key="cite")
+
+    assert seen == [client, client]
+    assert "待补充" not in result["content"]
+    assert "信息不足，需读原文" in result["content"]

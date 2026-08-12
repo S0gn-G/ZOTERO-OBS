@@ -6,7 +6,7 @@
   3. 证据包     —— 元数据 + 摘要 + 正文 + 图表清单 汇总为 bundle
   4. 写作计划   —— LLM 第一轮：输出结构化 JSON 计划（论文类型/要点/图表取舍/机制流程）
   5. 正文写作   —— LLM 第二轮：按 DeepPaperNote 章节骨架写整篇笔记
-  6. 校验与修复 —— 结构 lint（必需章节/图表引用），不通过则 LLM 修复一轮
+  6. 校验与修复 —— 本地整理后做结构 lint，仍有问题才由 LLM 修复一轮
   7. 交付       —— 返回 content + 需拷贝的图表；由调用方写入 Obsidian
 
 fail-closed：无 PDF 正文且无摘要时不做 LLM 硬编，生成骨架笔记并标记
@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import tempfile
+from functools import lru_cache
 
 import fitz
 from openai import OpenAI
@@ -31,8 +32,20 @@ PDF_MAX_CHARS = 30000  # 深度笔记需要更多证据
 
 def _extract_pdf_text(pdf_path: str, max_chars: int = PDF_MAX_CHARS) -> str:
     """提取 PDF 正文（截断到 max_chars）。无 PDF / 读取失败 / 扫描版时返回空串。"""
-    if not pdf_path or not os.path.exists(pdf_path):
+    if not pdf_path:
         return ""
+    try:
+        stat = os.stat(pdf_path)
+    except OSError:
+        return ""
+    return _extract_pdf_text_cached(
+        os.path.abspath(pdf_path), stat.st_mtime_ns, stat.st_size, max_chars
+    )
+
+
+@lru_cache(maxsize=16)
+def _extract_pdf_text_cached(pdf_path: str, _mtime_ns: int, _size: int,
+                             max_chars: int) -> str:
     try:
         import pdfplumber
 
@@ -163,8 +176,9 @@ def _extract_figures(pdf_path: str, seed: str) -> list[dict]:
             page = doc[pno - 1]
             page_w = page.rect.width
             page_h = page.rect.height
-            image_rects = _image_rects(page)
-            table_rects = _table_rects(page)
+            kinds = {cap["kind"] for cap in caps}
+            image_rects = _image_rects(page) if "fig" in kinds else []
+            table_rects = _table_rects(page) if "table" in kinds else []
             prev_bottom = MARGIN_TOP
             for i, cap in enumerate(caps):
                 next_cap = caps[i + 1] if i + 1 < len(caps) else None
@@ -412,8 +426,11 @@ def _validate_plan(plan) -> list[str]:
     return errs
 
 
-def llm_plan(bundle: dict, cfg: dict) -> dict:
-    client = _client(cfg)
+def llm_plan(bundle: dict, cfg: dict, client: OpenAI) -> dict:
+    messages = [
+        {"role": "system", "content": PLAN_SYSTEM(cfg)},
+        {"role": "user", "content": _plan_user(bundle)},
+    ]
     last_err = None
     for _ in range(3):  # 推理模型输出可能截断/加围栏，容错重试
         for use_json_mode in (True, False):  # 部分接口不支持 response_format，回退普通请求
@@ -421,10 +438,7 @@ def llm_plan(bundle: dict, cfg: dict) -> dict:
                 kwargs = {"response_format": {"type": "json_object"}} if use_json_mode else {}
                 resp = client.chat.completions.create(
                     model=cfg["llm_model"],
-                    messages=[
-                        {"role": "system", "content": PLAN_SYSTEM(cfg)},
-                        {"role": "user", "content": _plan_user(bundle)},
-                    ],
+                    messages=messages,
                     temperature=0.3,
                     max_tokens=8000,
                     **kwargs,
@@ -517,17 +531,17 @@ def _strip_fences(text: str) -> str:
     return t.strip()
 
 
-def llm_write(bundle: dict, plan: dict, cfg: dict, image_dir: str) -> str:
-    client = _client(cfg)
+def llm_write(bundle: dict, plan: dict, cfg: dict, image_dir: str, client: OpenAI) -> str:
+    messages = [
+        {"role": "system", "content": WRITE_SYSTEM(cfg)},
+        {"role": "user", "content": _write_user(bundle, plan, image_dir)},
+    ]
     last_err = None
     for _ in range(3):  # 推理模型偶发返回空 content，重试
         try:
             resp = client.chat.completions.create(
                 model=cfg["llm_model"],
-                messages=[
-                    {"role": "system", "content": WRITE_SYSTEM(cfg)},
-                    {"role": "user", "content": _write_user(bundle, plan, image_dir)},
-                ],
+                messages=messages,
                 temperature=0.7,
                 max_tokens=16000,
             )
@@ -618,11 +632,48 @@ def lint_note(body: str, plan: dict, figures: list[dict], image_dir: str) -> lis
             issues.append(f"图表引用指向不存在的文件：{ref}")
     for name in plan.get("figures_to_reference") or []:
         if f"images/{image_dir}/{name}" not in refs:
-            issues.append(f"计划要求引用的图表未在正文中出现：{name}")
+            issues.append(
+                f"计划要求引用的图表未在正文中出现：images/{image_dir}/{name}"
+            )
     # 表格与标题质量（Obsidian 渲染约束）
     issues.extend(_table_issues(body))
     issues.extend(_heading_issues(body))
     return issues
+
+
+PLACEHOLDER_RE = re.compile(r"(?:待补充|占位符|\[?(?:TODO|TBD)\]?)", re.IGNORECASE)
+
+
+def _normalize_plan_figures(plan: dict, figures: list[dict]) -> None:
+    """只保留实际提取成功的图表，避免模型计划引用不存在的文件。"""
+    available = {f["name"] for f in figures}
+    plan["figures_to_reference"] = [
+        name for name in (plan.get("figures_to_reference") or []) if name in available
+    ]
+
+
+def _finalize_body(body: str, plan: dict, figures: list[dict], image_dir: str) -> str:
+    """完成无需模型判断的结构修正：清除占位词并补齐已选图表链接。"""
+    body = PLACEHOLDER_RE.sub("信息不足，需读原文", body)
+    refs = {m.group(1) for m in re.finditer(r"\]\((images/[^)]+)\)", body)}
+    by_name = {f["name"]: f for f in figures}
+    missing = [
+        name for name in (plan.get("figures_to_reference") or [])
+        if name in by_name and f"images/{image_dir}/{name}" not in refs
+    ]
+    if not missing:
+        return body
+
+    lines = [] if "### 相关图表" in body else ["### 相关图表", ""]
+    for name in missing:
+        caption = re.sub(r"\s+", " ", by_name[name].get("caption") or name).strip()
+        caption = caption.replace("[", "（").replace("]", "）")
+        lines.append(f"![{caption}](images/{image_dir}/{name})")
+    addition = "\n\n".join(lines).strip()
+    marker = "\n## 局限"
+    if marker in body:
+        return body.replace(marker, f"\n\n{addition}{marker}", 1)
+    return f"{body.rstrip()}\n\n{addition}"
 
 
 FIX_SYSTEM = """你是论文笔记的审校专家。给定一份草稿笔记和问题清单，只修正问题清单指出的问题，
@@ -636,16 +687,17 @@ FIX_SYSTEM = """你是论文笔记的审校专家。给定一份草稿笔记和�
 - 修正时同样遵守格式约束：表格单元格内不用 $...$ 公式、表格各行列数一致、标题只用 ##/###。"""
 
 
-def llm_fix(body: str, issues: list[str], cfg: dict, bundle: dict | None = None) -> str:
-    client = _client(cfg)
+def llm_fix(body: str, issues: list[str], cfg: dict, bundle: dict | None,
+            client: OpenAI) -> str:
+    user_content = "问题清单：\n" + "\n".join(f"- {i}" for i in issues) + "\n\n"
+    if bundle is not None:
+        user_content += (
+            "原始证据包（JSON，修正时必须以其中的事实为准）：\n"
+            + json.dumps(bundle, ensure_ascii=False) + "\n\n"
+        )
+    user_content += "草稿笔记：\n" + body + "\n\n请输出修正后的完整正文。"
     for _ in range(2):  # 修复轮也可能输出过短骨架，重试一次
         try:
-            user_content = "问题清单：\n" + "\n".join(f"- {i}" for i in issues) + "\n\n"
-            if bundle is not None:
-                # 修复轮附上原始证据包，约束修正以事实为准，不脱离证据重写
-                user_content += "原始证据包（JSON，修正时必须以其中的事实为准）：\n" \
-                    + json.dumps(bundle, ensure_ascii=False) + "\n\n"
-            user_content += "草稿笔记：\n" + body + "\n\n请输出修正后的完整正文。"
             resp = client.chat.completions.create(
                 model=cfg["llm_model"],
                 messages=[
@@ -737,17 +789,18 @@ def generate_note(paper: dict, cfg: dict, note_key: str) -> dict:
     template = load_template(cfg)
     bundle = _build_bundle(paper, pdf_text, figures)
     try:
-        plan = llm_plan(bundle, cfg)
-        body = llm_write(bundle, plan, cfg, image_stem)
-        issues = lint_note(body, plan, figures, image_stem)
-        if issues:
-            try:
-                body = llm_fix(body, issues, cfg, bundle)
-                issues = lint_note(body, plan, figures, image_stem)  # 二次校验修复结果
-            except Exception:
-                pass  # 修复调用失败保留原稿，按首次 lint 结果判定
+        with _client(cfg) as client:
+            plan = llm_plan(bundle, cfg, client)
+            _normalize_plan_figures(plan, figures)
+            body = llm_write(bundle, plan, cfg, image_stem, client)
+            body = _finalize_body(body, plan, figures, image_stem)
+            issues = lint_note(body, plan, figures, image_stem)
             if issues:
-                raise ValueError("笔记校验未通过：" + "；".join(issues))
+                body = llm_fix(body, issues, cfg, bundle, client)
+                body = _finalize_body(body, plan, figures, image_stem)
+                issues = lint_note(body, plan, figures, image_stem)
+                if issues:
+                    raise ValueError("笔记校验未通过：" + "；".join(issues))
     except Exception:
         cleanup_figures(figures)  # LLM 阶段失败：清掉暂存图表，避免残留
         raise

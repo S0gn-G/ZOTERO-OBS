@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
     "llm_model": "deepseek-chat",
     # 研究领域与写作偏好；留空使用通用学术研究者设定。
     "llm_profile": "",
+    # 仅由顶栏按钮切换，不占用设置页空间。
+    "appearance_mode": "light",
 }
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -55,6 +57,8 @@ def load_config() -> dict:
             cfg.update({k: v for k, v in saved.items() if k in DEFAULT_CONFIG})
         except (json.JSONDecodeError, OSError):
             pass
+    if cfg["appearance_mode"] not in ("light", "dark"):
+        cfg["appearance_mode"] = "light"
     return cfg
 
 

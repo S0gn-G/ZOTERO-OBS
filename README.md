@@ -37,7 +37,7 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 
 “全选当前列表”只选择当前搜索与筛选结果。“PDF”按钮使用系统默认阅读器打开附件。批量生成最多并发处理 3 篇文献。
 
-论文卡片的整块区域共享同一悬停状态；鼠标经过标题、状态、空白处或操作按钮时不会反复闪烁。批量任务失败时，界面会在汇总状态之外直接显示首个具体错误，便于定位问题。
+界面提供日间与夜间模式，可通过顶栏按钮即时切换并在下次启动时恢复。日间模式使用白色页面、黑色主操作和浅灰辅助面；夜间模式使用深灰页面、浅色主操作与相同的小面积语义状态色。论文列表整行共享同一悬停状态；鼠标经过标题、状态、空白处或操作按钮时不会反复闪烁。搜索输入会在短暂停顿后统一刷新，并复用已经创建的论文行，避免连续输入时重复重建整张列表。批量任务失败时，界面会在汇总状态之外直接显示首个具体错误，便于定位问题。
 
 ## 状态含义
 
@@ -52,7 +52,7 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 
 ## 设置与配置
 
-界面只保留六项设置：
+界面只保留六项用户设置：
 
 | 字段 | 用途 |
 |---|---|
@@ -62,6 +62,8 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 | `llm_api_key` | API Key |
 | `llm_model` | 模型名称 |
 | `llm_profile` | 研究领域或写作偏好；留空时使用通用学术研究者设定 |
+
+此外，程序会在配置文件中保存一项界面状态 `appearance_mode`，值为 `light` 或 `dark`。它只记录顶栏日间/夜间按钮的当前选择，不是设置页中的新增选项。
 
 Zotero 地址固定为 `http://127.0.0.1:23119/api/`；文献存在 PDF 时始终读取正文，不提供额外高级开关。
 
@@ -74,11 +76,12 @@ Zotero 地址固定为 `http://127.0.0.1:23119/api/`；文献存在 PDF 时始�
   "llm_base_url": "https://api.deepseek.com/v1",
   "llm_api_key": "",
   "llm_model": "deepseek-chat",
-  "llm_profile": ""
+  "llm_profile": "",
+  "appearance_mode": "light"
 }
 ```
 
-旧版的 Vault 路径和笔记子目录会在读取时合并为 `notes_path`；保存一次设置后，只会写入上述六项。`config.json` 含明文 API Key，已被 `.gitignore` 排除，不要上传或分享个人配置。
+旧版的 Vault 路径和笔记子目录会在读取时合并为 `notes_path`；缺少界面状态的旧配置默认使用日间模式。保存后只会写入上述六项用户设置和一项界面状态。`config.json` 含明文 API Key，已被 `.gitignore` 排除，不要上传或分享个人配置。
 
 ## 生成与写入规则
 
@@ -91,7 +94,7 @@ Zotero 本地 API
   → Obsidian 笔记目录
 ```
 
-证据不足时程序不会要求模型猜测：没有 PDF 正文但有摘要时标记为“仅摘要”；正文和摘要都没有时生成“需原文”骨架。模型生成内容经校验后最多修复一次；仍有问题则本次生成失败，不写入残缺结果。
+证据不足时程序不会要求模型猜测：没有 PDF 正文但有摘要时标记为“仅摘要”；正文和摘要都没有时生成“需原文”骨架。占位词和已选图表链接先由本地确定性整理，只有仍存在结构或格式问题时才调用模型修复一次；仍有问题则本次生成失败，不写入残缺结果。同一篇笔记的规划、写作和修复共用一个模型客户端连接；同次运行中重新生成未变化的 PDF 时会复用正文提取结果。
 
 笔记文件默认直接使用论文标题，例如 `Auto-Encoding Variational Bayes.md`。Windows 文件名中的非法字符会替换为连字符；只有论文标题与已有文件冲突时才追加 Zotero key。图片仍位于稳定的 `images/<安全 citekey>-<Zotero key>/`。程序根据 frontmatter 中的 `zotero_key` 定位已有笔记，因此用户可以在输出目录及其子目录中自由改名或移动笔记，重新生成不会把名称改回。若同一 Zotero key 对应多份笔记，程序会报告冲突，不会任选一份覆盖。
 
@@ -122,12 +125,12 @@ Zotero 本地 API
 | Zotero 数据源 | `http://127.0.0.1:23119/api/` |
 | LLM | 设置中的 `llm_base_url` |
 
-界面优先使用免费开源的 Noto Sans SC；系统没有该字体时由 Tk 使用系统字体替代。字体文件没有打进仓库或 exe。
+界面使用 Windows 自带的 `Microsoft YaHei UI`，不需要额外下载或在 exe 中分发字体文件。
 
 ## 当前架构
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Noto Sans SC, Microsoft YaHei, sans-serif"}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Microsoft YaHei UI, sans-serif"}}}%%
 flowchart TB
     ZOTERO["Zotero 7 本地 API"] -->|"分页读取"| ZCLIENT["zotero_client.py<br/>元数据与附件解析"]
     ZCLIENT -->|"文献列表"| APP["gui/app.py<br/>搜索、筛选与任务调度"]
@@ -137,7 +140,7 @@ flowchart TB
     WRITER -->|"原子提交 / 完整回滚"| NOTES["notes_path<br/>Markdown + images/"]
 
     ENTRY["main.py<br/>程序入口"] --> APP
-    SETTINGS["gui/settings_view.py<br/>六项设置"] --> APP
+    SETTINGS["gui/settings_view.py<br/>六项用户设置"] --> APP
     VISUAL["gui/design.py + gui/icons.py<br/>视觉系统"] --> APP
 
     CFGFILE["config.json"] <--> CONFIG["config.py<br/>迁移与原子保存"]
@@ -164,12 +167,12 @@ flowchart TB
 | 模块 | 职责 |
 |---|---|
 | `main.py` | GUI 入口 |
-| `config.py` | 六项配置、旧配置迁移与原子保存 |
+| `config.py` | 六项用户设置、一项界面状态、旧配置迁移与原子保存 |
 | `zotero_client.py` | Zotero 分页读取、元数据标准化与 PDF 路径解析 |
 | `note_generator.py` | PDF/图表提取、模型调用、校验与模板渲染 |
 | `obsidian_writer.py` | 笔记定位、手写区保留与整体事务提交 |
 | `gui/app.py` | 主界面、筛选、单篇和批量任务 |
-| `gui/settings_view.py` | 六项设置编辑 |
+| `gui/settings_view.py` | 六项用户设置编辑 |
 | `gui/design.py` | 颜色、字体、层级和状态样式 |
 | `gui/icons.py` | 轻量界面图标 |
 | `tests/` | 自动回归测试 |

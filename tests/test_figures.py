@@ -1,4 +1,7 @@
 """_clip_region 图表裁剪几何测试：fig 上探 / 高图 gap / table bbox / 兜底封顶 / Table→Figure 不跳过。"""
+import pytest
+
+import note_generator as ng
 from note_generator import _clip_region, _table_rects, CAPTION_RE, MIN_FIG_H
 
 
@@ -150,3 +153,40 @@ def test_caption_re_arabic_still_works():
 def test_caption_re_rejects_roman_inside_word():
     # "Table Index" 不应被当成 Table I
     assert CAPTION_RE.match("Table Index 2021") is None
+
+
+def test_fig_only_page_skips_table_detection(tmp_path, monkeypatch):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"pdf")
+
+    class Page:
+        class Rect:
+            width = 595
+            height = 842
+
+        rect = Rect()
+
+    class Doc:
+        page_count = 1
+
+        def __getitem__(self, _index):
+            return Page()
+
+        def close(self):
+            return None
+
+    calls = []
+    monkeypatch.setattr(ng.fitz, "open", lambda _path: Doc())
+    monkeypatch.setattr(
+        ng, "_page_captions",
+        lambda _doc, _pno: [{"kind": "fig", "num": "1", "y0": 100, "y1": 110,
+                             "x0": 50, "x1": 500, "text": "Figure 1: demo"}],
+    )
+    monkeypatch.setattr(ng, "_image_rects", lambda _page: calls.append("image") or [])
+    monkeypatch.setattr(
+        ng, "_table_rects",
+        lambda _page: pytest.fail("纯 Figure 页不应执行表格检测"),
+    )
+
+    assert ng._extract_figures(str(pdf), "K1") == []
+    assert calls == ["image"]
