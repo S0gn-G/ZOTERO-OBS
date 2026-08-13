@@ -4,7 +4,7 @@ ZotNotes 是一个 Windows 桌面工具：从正在运行的 Zotero 读取文献
 
 - 源码：<https://github.com/westriver-moon/ZOTERO-OBS>
 - Windows 成品：<https://github.com/westriver-moon/ZOTERO-OBS/releases>
-- 当前发行版：`v0.2.0-rc.2`
+- 当前发行版：`v0.2.0`
 
 ## 使用条件
 
