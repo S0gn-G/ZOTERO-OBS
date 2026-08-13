@@ -37,6 +37,7 @@ STATE_STYLE = {
     "ok": ("已生成", SUCCESS_SOFT, SUCCESS_TEXT),
     "needs_source": ("需原文", WARNING_SOFT, WARNING_TEXT),
     "abstract_only": ("仅摘要", WARNING_SOFT, WARNING_TEXT),
+    "stale": ("待同步", WARNING_SOFT, WARNING_TEXT),
     "placeholder": ("需修复", DANGER_SOFT, DANGER_TEXT),
     "failed": ("失败", DANGER_SOFT, DANGER_TEXT),
     "none": ("未生成", NEUTRAL_SOFT, NEUTRAL_TEXT),

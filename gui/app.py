@@ -5,6 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from urllib.parse import quote
 
 import customtkinter as ctk
 from tkinter import messagebox
@@ -16,7 +17,7 @@ from discovery.core import (
     DiscoveryReport,
     notes_path_for_vault,
 )
-from obsidian_writer import ObsidianWriter
+from obsidian_writer import NoteState, ObsidianWriter
 from note_generator import generate_note, load_template, default_template_path, cleanup_figures
 from zotero_client import DEFAULT_BASE_URL, ZoteroClient
 from gui import icons
@@ -41,14 +42,34 @@ def _fmt_mtime(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
+def _needs_sync(paper: dict, note: NoteState | None) -> bool:
+    source = paper.get("source_modified") or ""
+    return bool(note and note.path and source and note.source != source)
+
+
+def _generation_targets(rows: dict, mode: str) -> list:
+    selected = [row for row in rows.values() if row.selected()]
+    return selected or (list(rows.values()) if mode == "待同步" else [])
+
+
+def _zotero_uri(key: str) -> str:
+    return f"zotero://select/library/items/{quote(key, safe='')}"
+
+
+def _obsidian_uri(path: str) -> str:
+    normalized = os.path.abspath(path).replace("\\", "/")
+    return f"obsidian://open?path={quote(normalized, safe='')}"
+
+
 class PaperRow:
     """论文列表行：网页式扁平布局，整行共享悬停状态。"""
 
     def __init__(self, parent, paper: dict, note_key: str, note_state: str,
-                 on_generate, on_open_pdf, on_select, updated_at=None):
+                 on_generate, on_open, on_select, updated_at=None, has_note=False):
         self.paper = paper
         self.note_key = note_key
         self.note_state = note_state
+        self.has_note = has_note
         self.updated_at = updated_at
         self._hovered = False
         self._hover_job = None
@@ -98,6 +119,25 @@ class PaperRow:
         )
         self.sub_label.grid(row=0, column=1, sticky="ew")
 
+        links = ctk.CTkFrame(meta, fg_color="transparent")
+        links.grid(row=0, column=2, sticky="e")
+        ctk.CTkButton(
+            links, text="Zotero", width=54, height=22, corner_radius=6,
+            fg_color="transparent", hover_color=ui.SURFACE_HOVER,
+            text_color=ui.ACCENT_TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+            command=lambda: on_open("zotero", paper["key"]),
+        ).pack(side="left")
+        self.obsidian_btn = ctk.CTkButton(
+            links, text="Obsidian", width=66, height=22, corner_radius=6,
+            fg_color="transparent", hover_color=ui.SURFACE_HOVER,
+            text_color=ui.ACCENT_TEXT,
+            font=ctk.CTkFont(family=ui.FONT_FAMILY, size=11),
+            command=lambda: on_open("obsidian", paper["key"]),
+            state="normal" if has_note else "disabled",
+        )
+        self.obsidian_btn.pack(side="left", padx=(2, 0))
+
         label, bg, fg = ui.STATE_STYLE[note_state]
         self.status = ctk.CTkLabel(
             self.frame, text=label, width=64, height=26,
@@ -110,7 +150,7 @@ class PaperRow:
         actions.grid(row=0, column=4, rowspan=2, padx=(0, 12), pady=12)
 
         self.generate_btn = ctk.CTkButton(
-            actions, text="重新生成" if note_state == "ok" else "生成笔记",
+            actions, text=self._action_text(),
             width=102, height=34, corner_radius=8, image=icons.play(),
             fg_color=ui.ACCENT, hover_color=ui.ACCENT_HOVER,
             command=lambda: on_generate(paper["key"]),
@@ -123,7 +163,7 @@ class PaperRow:
                 fg_color=ui.SURFACE, hover_color=ui.SURFACE_HOVER,
                 border_width=1, border_color=ui.BORDER_STRONG,
                 text_color=ui.TEXT,
-                command=lambda: on_open_pdf(paper["key"]),
+                command=lambda: on_open("pdf", paper["key"]),
             ).pack(side="right")
 
         self.frame.bind("<Configure>", self._resize_title, add="+")
@@ -207,33 +247,32 @@ class PaperRow:
     def selected(self) -> bool:
         return bool(self.check.get())
 
-    def mark_done(self):
-        self._set_state("ok")
-        self.generate_btn.configure(text="重新生成")
-        self.set_updated_at(_fmt_mtime(time.time()))
-
-    def mark_needs_source(self):
-        self._set_state("needs_source")
-        self.set_updated_at(_fmt_mtime(time.time()))
-
-    def mark_abstract_only(self):
-        self._set_state("abstract_only")
-        self.set_updated_at(_fmt_mtime(time.time()))
-
     def _set_state(self, state: str):
         self.note_state = state
         label, bg, fg = ui.STATE_STYLE[state]
         self.status.configure(text=label, fg_color=bg, text_color=fg)
 
+    def _action_text(self) -> str:
+        if self.note_state == "failed":
+            return "重试"
+        if self.note_state == "stale":
+            return "同步更新"
+        return "生成笔记" if self.note_state == "none" else "重新生成"
+
+    def apply_state(self, state: str, updated_at=None, has_note=None):
+        self._set_state(state)
+        if updated_at is not None:
+            self.set_updated_at(updated_at)
+        if has_note is not None:
+            self.has_note = has_note
+            self.obsidian_btn.configure(state="normal" if has_note else "disabled")
+        self.generate_btn.configure(state="normal", text=self._action_text())
+
     def set_generating(self, on: bool):
         if on:
             self.generate_btn.configure(state="disabled", text="生成中…")
         else:
-            self.generate_btn.configure(state="normal", text="生成笔记")
-
-    def mark_failed(self):
-        self._set_state("failed")
-        self.generate_btn.configure(state="normal", text="重试")
+            self.generate_btn.configure(state="normal", text=self._action_text())
 
 
 class App(ctk.CTk):
@@ -250,7 +289,8 @@ class App(ctk.CTk):
             save_config(self.cfg)  # 首次启动：落盘默认配置，用户可直接编辑
         load_template(self.cfg)  # 模板缺失时自动创建默认模板
         self.papers: list[dict] = []
-        self.paper_states: dict[str, tuple[str, float | None]] = {}
+        self.notes: dict[str, NoteState] = {}
+        self.failed_keys: set[str] = set()
         self.rows: dict[str, PaperRow] = {}
         self.visible_rows: dict[str, PaperRow] = {}
         self._empty_label = None
@@ -492,7 +532,7 @@ class App(ctk.CTk):
         self.search_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=2)
         self.search_entry.bind("<KeyRelease>", self._schedule_filter)
         self.filter_control = ctk.CTkSegmentedButton(
-            toolbar, values=["含 PDF", "全部", "未生成", "需处理"],
+            toolbar, values=["含 PDF", "全部", "未生成", "待同步", "需处理"],
             variable=self.filter_var, command=lambda _value: self._filter_changed(),
             height=36, corner_radius=8,
             selected_color=ui.SURFACE_SELECTED, selected_hover_color=ui.BORDER_STRONG,
@@ -597,12 +637,22 @@ class App(ctk.CTk):
     def _update_selection_status(self):
         count = sum(1 for row in self.visible_rows.values() if row.selected())
         self.selected_label.configure(text=f"已选 {count} 篇")
-        self.generate_btn.configure(text=f"生成 {count} 篇笔记" if count else "生成所选笔记")
+        sync_all = bool(
+            not count and self.filter_var.get() == "待同步" and self.visible_rows
+        )
+        if count:
+            button_text = f"生成 / 更新 {count} 篇"
+        elif sync_all:
+            button_text = f"同步当前 {len(self.visible_rows)} 篇"
+        else:
+            button_text = "生成所选笔记"
+        self.generate_btn.configure(text=button_text)
         if not self._busy:
+            enabled = bool(count or sync_all)
             self.generate_btn.configure(
-                state="normal" if count else "disabled",
-                fg_color=ui.ACCENT if count else ui.NEUTRAL_SOFT,
-                text_color=ui.ON_ACCENT if count else ui.TEXT_TERTIARY,
+                state="normal" if enabled else "disabled",
+                fg_color=ui.ACCENT if enabled else ui.NEUTRAL_SOFT,
+                text_color=ui.ON_ACCENT if enabled else ui.TEXT_TERTIARY,
             )
 
     def auto_connect(self):
@@ -708,20 +758,32 @@ class App(ctk.CTk):
             image=icons.sun() if dark else icons.moon(),
         )
 
-    def _paper_state(self, key: str) -> tuple[str, float | None]:
-        return self.paper_states.get(key, ("none", None))
+    def _paper_state(self, paper: dict) -> tuple[str, float | None]:
+        key = paper["key"]
+        note = self.notes.get(key)
+        if _needs_sync(paper, note):
+            return "stale", note.mtime
+        if key in self.failed_keys:
+            return "failed", note.mtime if note else None
+        if note is None:
+            return "none", None
+        return note.status, note.mtime
 
     def _filtered_papers(self) -> list[dict]:
         query = self.search_entry.get().strip().lower()
         mode = self.filter_var.get()
         out = []
         for paper in self.papers:
-            state, _mtime = self._paper_state(paper["key"])
+            state, _mtime = self._paper_state(paper)
             if mode == "含 PDF" and not paper.get("pdf_path"):
                 continue
             if mode == "未生成" and state != "none":
                 continue
-            if mode == "需处理" and state not in ("needs_source", "abstract_only", "placeholder", "failed"):
+            if mode == "待同步" and state != "stale":
+                continue
+            if mode == "需处理" and state not in (
+                "stale", "needs_source", "abstract_only", "placeholder", "failed"
+            ):
                 continue
             if query:
                 haystack = " ".join([
@@ -765,12 +827,13 @@ class App(ctk.CTk):
         for paper in papers:
             row = self.rows.get(paper["key"])
             if row is None:
-                state, mtime = self._paper_state(paper["key"])
+                state, mtime = self._paper_state(paper)
                 updated = _fmt_mtime(mtime) if mtime else None
+                has_note = bool(self.notes.get(paper["key"]) and self.notes[paper["key"]].path)
                 row = PaperRow(
                     self.list_frame, paper, paper["citationKey"], state,
-                    on_generate=self.generate_one, on_open_pdf=self.open_pdf,
-                    on_select=self._on_row_selected, updated_at=updated,
+                    on_generate=self.generate_one, on_open=self.open_target,
+                    on_select=self._on_row_selected, updated_at=updated, has_note=has_note,
                 )
                 self.rows[paper["key"]] = row
             ordered_rows.append((paper["key"], row))
@@ -788,10 +851,13 @@ class App(ctk.CTk):
     def _refresh_info(self, visible=None):
         """从当前内存状态更新视图统计，不重复扫描磁盘。"""
         visible = len(self._filtered_papers()) if visible is None else visible
-        states = [self._paper_state(p["key"])[0] for p in self.papers]
+        states = [self._paper_state(p)[0] for p in self.papers]
         done = states.count("ok")
         pending = states.count("none")
-        attention = sum(s in ("needs_source", "abstract_only", "placeholder", "failed") for s in states)
+        attention = sum(
+            s in ("stale", "needs_source", "abstract_only", "placeholder", "failed")
+            for s in states
+        )
         self._set_info(f"显示 {visible} / {len(self.papers)} 篇")
         self.generated_stat.configure(text=f"已生成 {done}")
         self.pending_stat.configure(text=f"未生成 {pending}")
@@ -832,10 +898,17 @@ class App(ctk.CTk):
         papers, states, success_status = result
         self._clear_rows()
         self.papers = papers
-        self.paper_states = {
-            key: ({"insufficient": "needs_source"}.get(state, state), mtime)
-            for key, state, mtime in states
+        self.notes = {
+            note.key: NoteState(
+                note.key,
+                {"insufficient": "needs_source"}.get(note.status, note.status),
+                note.mtime,
+                note.path,
+                note.source,
+            )
+            for note in states
         }
+        self.failed_keys.clear()
         self.progress.stop()
         self.progress.configure(mode="determinate")
         self.progress.grid_remove()
@@ -905,7 +978,8 @@ class App(ctk.CTk):
             figures = result["figures"]
             missing = writer.commit_generation(
                 row.note_key, result["content"], figures,
-                zotero_key=row.paper["key"], note_title=row.paper["title"])
+                zotero_key=row.paper["key"], note_title=row.paper["title"],
+                zotero_source=row.paper.get("source_modified"))
             if missing:
                 return False, "failed", f"图表拷贝失败：{', '.join(missing)}"
             return True, result["status"], "OK"
@@ -925,32 +999,43 @@ class App(ctk.CTk):
         self.progress.grid_remove()
         row.set_generating(False)
         if ok and status == "needs_source":
-            row.mark_needs_source()
-            self.paper_states[row.paper["key"]] = ("needs_source", time.time())
+            self._record_result(row, "needs_source", True)
             self._set_status(f"已生成骨架（证据不足）：{row.paper['title'][:40]}")
         elif ok and status == "abstract_only":
-            row.mark_abstract_only()
-            self.paper_states[row.paper["key"]] = ("abstract_only", time.time())
+            self._record_result(row, "abstract_only", True)
             self._set_status(f"已生成（仅摘要）：{row.paper['title'][:40]}")
         elif ok:
-            row.mark_done()
-            self.paper_states[row.paper["key"]] = ("ok", time.time())
+            self._record_result(row, "ok", True)
             self._set_status(f"已生成：{row.paper['title'][:40]}")
         else:
-            row.mark_failed()
-            self.paper_states[row.paper["key"]] = ("failed", None)
+            self._record_result(row, "failed", False)
             self._set_status(f"生成失败：{err}")
-        self._refresh_info()
         self._generating = False
         self._set_busy(False)
+        self._filter_changed()
+
+    def _record_result(self, row, status: str, success: bool):
+        key = row.paper["key"]
+        if success:
+            path = self.writer.find_note(key) or ""
+            now = time.time()
+            self.notes[key] = NoteState(
+                key, status, now, path, row.paper.get("source_modified") or ""
+            )
+            self.failed_keys.discard(key)
+            row.apply_state(status, _fmt_mtime(now), has_note=bool(path))
+            return
+        self.failed_keys.add(key)
+        note = self.notes.get(key)
+        row.apply_state("failed", has_note=bool(note and note.path))
 
     # ---------- 批量生成 ----------
     def generate(self):
         if self._busy:
             return
-        selected = [r for r in self.visible_rows.values() if r.selected()]
+        selected = _generation_targets(self.visible_rows, self.filter_var.get())
         if not selected:
-            self._set_status("请先勾选至少一篇文献")
+            self._set_status("请先勾选文献，或切换到“待同步”一键更新当前列表")
             return
         if not self.cfg["notes_path"]:
             self._set_status("请先在设置里选择笔记输出文件夹")
@@ -1001,18 +1086,13 @@ class App(ctk.CTk):
             if not row:
                 continue
             if s == "ok" and r == "OK":
-                row.mark_done()
-                self.paper_states[key] = ("ok", time.time())
+                self._record_result(row, "ok", True)
             elif s == "needs_source":
-                row.mark_needs_source()
-                self.paper_states[key] = ("needs_source", time.time())
+                self._record_result(row, "needs_source", True)
             elif s == "abstract_only":
-                row.mark_abstract_only()
-                self.paper_states[key] = ("abstract_only", time.time())
+                self._record_result(row, "abstract_only", True)
             else:
-                row.mark_failed()
-                self.paper_states[key] = ("failed", None)
-        self._refresh_info()
+                self._record_result(row, "failed", False)
         self._generating = False
         self._set_busy(False)
         self.progress.set(1.0)
@@ -1025,23 +1105,41 @@ class App(ctk.CTk):
         if failed:
             parts.append(f"失败 {failed}")
         self._set_status("完成 · " + " · ".join(parts))
+        self._filter_changed()
         if first_error:
             self._set_info(f"首个错误：{first_error[:80]}")
 
-    # ---------- PDF ----------
-    def open_pdf(self, key: str):
+    # ---------- 外部跳转 ----------
+    def open_target(self, target: str, key: str):
         paper = next((p for p in self.papers if p["key"] == key), None)
-        path = paper.get("pdf_path") if paper else None
-        if not path:
-            self._set_status("该条目没有 PDF 附件")
-            return
-        if not os.path.exists(path):
-            self._set_status(f"PDF 文件不存在：{path}")
-            return
+        if target == "pdf":
+            path = paper.get("pdf_path") if paper else None
+            if not path:
+                self._set_status("该条目没有 PDF 附件")
+                return
+            if not os.path.exists(path):
+                self._set_status(f"PDF 文件不存在：{path}")
+                return
+            destination = path
+            label = "PDF"
+        elif target == "zotero":
+            destination = _zotero_uri(key)
+            label = "Zotero"
+        else:
+            try:
+                path = self.writer.find_note(key)
+            except RuntimeError as exc:
+                self._set_status(str(exc))
+                return
+            if not path:
+                self._set_status("该条目还没有对应的 Obsidian 笔记")
+                return
+            destination = _obsidian_uri(path)
+            label = "Obsidian"
         try:
-            os.startfile(path)
-        except Exception as e:
-            self._set_status(f"无法打开 PDF：{e}")
+            os.startfile(destination)
+        except OSError as exc:
+            self._set_status(f"无法打开 {label}：{exc}")
 
     # ---------- 模板 ----------
     def open_template(self):

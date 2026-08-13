@@ -98,6 +98,13 @@ class ZoteroClient:
             if c.get("lastName") or c.get("firstName")
         ]
         att = att_by_parent.get(it["key"])
+        att_data = att.get("data", {}) if att else {}
+        source_parts = (
+            d.get("dateModified") or "",
+            att.get("key", "") if att else "",
+            att_data.get("dateModified") or "",
+        )
+        source_modified = "|".join(source_parts) if any(source_parts) else ""
         return {
             "key": it["key"],
             "itemType": d.get("itemType", ""),
@@ -116,6 +123,8 @@ class ZoteroClient:
             "citationKey": d.get("citationKey") or d.get("citekey") or "",
             "pdf_path": self._pdf_path(att),
             "dateAdded": d.get("dateAdded") or "",
+            "dateModified": d.get("dateModified") or "",
+            "source_modified": source_modified,
         }
 
     @staticmethod

@@ -2,8 +2,10 @@
 import os
 import re
 import shutil
+from dataclasses import dataclass
 
 FRONTMATTER_KEY_RE = re.compile(r'^zotero_key:\s*["\']?([A-Za-z0-9]+)["\']?\s*$', re.M)
+ZOTERO_SOURCE_RE = re.compile(r'^zotero_source:\s*"?([^"\r\n]*)"?\s*$', re.M)
 EVIDENCE_INSUFFICIENT_RE = re.compile(r'^evidence:\s*insufficient\s*$', re.M)
 EVIDENCE_ABSTRACT_RE = re.compile(r'^evidence:\s*abstract_only\s*$', re.M)
 # 修复轮偷懒产物：整篇「待补充」骨架（与 evidence: insufficient 不同，它其实没走 fail-closed）
@@ -15,6 +17,15 @@ QUESTIONS_HEADING = "## 疑问"
 
 # frontmatter 的 note_file 字段：写回时按实际文件名同步（用户改名后不残留假值）
 NOTE_FILE_RE = re.compile(r"^note_file:\s*.*$", re.M)
+
+
+@dataclass(frozen=True, slots=True)
+class NoteState:
+    key: str
+    status: str
+    mtime: float
+    path: str
+    source: str = ""
 
 
 # Windows 保留设备名：即使带扩展名也非法（CON.md / NUL.txt / COM1.pdf…）
@@ -104,6 +115,21 @@ def _sync_note_file(content: str, actual_basename: str) -> str:
     return content
 
 
+def _sync_zotero_source(content: str, source: str | None) -> str:
+    """在成功提交的 frontmatter 中写入本次 Zotero 来源版本。"""
+    if not source:
+        return content
+    clean_source = source.replace('"', "")
+    line = f'zotero_source: "{clean_source}"'
+    if ZOTERO_SOURCE_RE.search(content):
+        return ZOTERO_SOURCE_RE.sub(line, content, count=1)
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            return content[:end] + "\n" + line + content[end:]
+    return content
+
+
 class NotePathConflict(Exception):
     """目标笔记文件被其他文献（或无 frontmatter 的人工文件）占用，拒绝覆盖。"""
 
@@ -130,13 +156,13 @@ class ObsidianWriter:
         stem = safe_note_title(note_title) if note_title else self._stem(citation_key, zotero_key)
         return os.path.join(self.notes_dir, f"{stem}.md")
 
-    def scan_states(self) -> list[tuple[str, str, float]]:
-        """单次扫描笔记目录，返回 [(zotero_key, state, mtime)]。
+    def scan_states(self) -> list[NoteState]:
+        """单次扫描笔记目录，返回现有笔记状态及其 Zotero 同步基线。
 
         state ∈ ok / insufficient / abstract_only / placeholder。
         占位符检测只对 LLM 生成的正文区（「## 我的笔记」之前）计数，避免用户手写的
         「我的笔记/疑问」区出现 TODO 等词时误判为需修复。"""
-        out: list[tuple[str, str, float]] = []
+        out: list[NoteState] = []
         if not os.path.isdir(self.notes_dir):
             return out
         seen: dict[str, str] = {}
@@ -168,7 +194,11 @@ class ObsidianWriter:
                     state = "abstract_only"
                 else:
                     state = "ok"
-                out.append((key, state, mtime))
+                source_match = ZOTERO_SOURCE_RE.search(content)
+                out.append(NoteState(
+                    key, state, mtime, os.path.abspath(path),
+                    source_match.group(1) if source_match else "",
+                ))
         return out
 
     def _find_note_by_key(self, zotero_key: str) -> str | None:
@@ -193,6 +223,10 @@ class ObsidianWriter:
                         raise RuntimeError(f"发现重复 Zotero 笔记：{found} 和 {path}")
                     found = path
         return found
+
+    def find_note(self, zotero_key: str) -> str | None:
+        """返回指定 Zotero 条目的实际笔记路径，支持用户改名或移动。"""
+        return self._find_note_by_key(zotero_key)
 
     @staticmethod
     def _atomic_write(path: str, content: str) -> None:
@@ -252,7 +286,8 @@ class ObsidianWriter:
 
     def write_note_preserving(self, citation_key: str, content: str,
                               zotero_key: str | None = None,
-                              note_title: str | None = None) -> str:
+                              note_title: str | None = None,
+                              zotero_source: str | None = None) -> str:
         """写笔记，保留手写区，并把 note_file 同步为用户当前使用的实际文件名。
 
         目标文件被其他文献/无 frontmatter 文件占用且无改名旧笔记时抛 NotePathConflict。"""
@@ -265,6 +300,7 @@ class ObsidianWriter:
             except OSError:
                 old = ""
         merged = merge_handwritten(old, _sync_note_file(content, os.path.basename(path)))
+        merged = _sync_zotero_source(merged, zotero_source)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._atomic_write(path, merged)
         return path
@@ -309,7 +345,8 @@ class ObsidianWriter:
 
     def commit_generation(self, citation_key: str, content: str, figures: list[dict],
                           zotero_key: str | None = None,
-                          note_title: str | None = None) -> list[str]:
+                          note_title: str | None = None,
+                          zotero_source: str | None = None) -> list[str]:
         """Markdown 与图片作为整体事务交付：失败回滚到旧态，绝不产生「旧笔记 + 新图」。
 
         1. 无图 → 仅写笔记（保留手写区），返回 []。
@@ -319,7 +356,9 @@ class ObsidianWriter:
         任一步失败：恢复旧 Markdown（原不存在则删除新文件）、恢复旧图片目录、清理 tmp 后 raise。
         返回缺失文件名列表（空 = 已提交）。"""
         if not figures:
-            self.write_note_preserving(citation_key, content, zotero_key, note_title)
+            self.write_note_preserving(
+                citation_key, content, zotero_key, note_title, zotero_source
+            )
             return []
         dest_dir = os.path.join(self.notes_dir, "images", self._stem(citation_key, zotero_key))
         missing = self._stage_images(dest_dir, figures)
@@ -339,6 +378,7 @@ class ObsidianWriter:
                 except OSError:
                     old = ""
             merged = merge_handwritten(old, _sync_note_file(content, os.path.basename(path)))
+            merged = _sync_zotero_source(merged, zotero_source)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             self._atomic_write(path, merged)  # Markdown 先落盘，再切图片
             self._swap_images(dest_dir, dest_dir + ".tmp")

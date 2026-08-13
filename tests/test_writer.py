@@ -124,7 +124,7 @@ def test_scan_states_four_states(tmp_path):
     write("insuff.md", "---\nzotero_key: \"IS1\"\nevidence: insufficient\n---\n\n# B\n")
     write("abs.md", "---\nzotero_key: \"AB1\"\nevidence: abstract_only\n---\n\n# C\n")
     write("ph.md", "---\nzotero_key: \"PH1\"\n---\n\n# D\n\n待补充 待补充\n")
-    states = {k: s for k, s, _m in w.scan_states()}
+    states = {note.key: note.status for note in w.scan_states()}
     assert states == {"OK1": "ok", "IS1": "insufficient", "AB1": "abstract_only", "PH1": "placeholder"}
 
 
@@ -135,7 +135,7 @@ def test_scan_states_ignores_placeholder_in_handwritten(tmp_path):
     content = "---\nzotero_key: \"K1\"\n---\n\n# A\n\n## 我的笔记\n\nTODO 待补充 占位符\n"
     with open(os.path.join(w.notes_dir, "note.md"), "w", encoding="utf-8") as f:
         f.write(content)
-    states = {k: s for k, s, _m in w.scan_states()}
+    states = {note.key: note.status for note in w.scan_states()}
     assert states["K1"] == "ok"
 
 
@@ -146,7 +146,7 @@ def test_scan_states_placeholder_in_llm_body(tmp_path):
     content = "---\nzotero_key: \"K1\"\n---\n\n# A\n\n待补充 待补充\n\n## 我的笔记\n"
     with open(os.path.join(w.notes_dir, "note.md"), "w", encoding="utf-8") as f:
         f.write(content)
-    states = {k: s for k, s, _m in w.scan_states()}
+    states = {note.key: note.status for note in w.scan_states()}
     assert states["K1"] == "placeholder"
 
 
@@ -265,12 +265,43 @@ def test_commit_generation_no_figures_writes_note_only(tmp_path):
     assert not (tmp_path / "Notes" / "images").exists()
 
 
+def test_commit_generation_records_and_replaces_zotero_source(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    content = '---\nzotero_key: "K1"\n---\n\n# New\n\n## 我的笔记\n\n手写\n'
+
+    w.commit_generation("cite", content, [], zotero_key="K1", zotero_source="old|ATT1|old")
+    w.commit_generation("cite", content, [], zotero_key="K1", zotero_source="new|ATT1|new")
+
+    note = w.scan_states()[0]
+    written = (tmp_path / "Notes" / "cite-K1.md").read_text(encoding="utf-8")
+    assert note.source == "new|ATT1|new"
+    assert note.path == os.path.abspath(tmp_path / "Notes" / "cite-K1.md")
+    assert written.count("zotero_source:") == 1
+    assert "手写" in written
+
+
 def test_commit_generation_missing_fig_no_commit(tmp_path):
     w = ObsidianWriter(str(tmp_path / "Notes"))
     figs = [_fig("fig_1.png", str(tmp_path / "missing.png"))]
     assert w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n", figs, zotero_key="K1") == ["fig_1.png"]
     assert not (tmp_path / "Notes" / "cite-K1.md").exists()
     assert not (tmp_path / "Notes" / "images" / "cite-K1").exists()
+
+
+def test_missing_figure_does_not_advance_zotero_source(tmp_path):
+    w = ObsidianWriter(str(tmp_path / "Notes"))
+    w.commit_generation(
+        "cite", '---\nzotero_key: "K1"\n---\n\n# Old\n', [],
+        zotero_key="K1", zotero_source="old",
+    )
+    missing = w.commit_generation(
+        "cite", '---\nzotero_key: "K1"\n---\n\n# New\n',
+        [_fig("fig.png", str(tmp_path / "missing.png"))],
+        zotero_key="K1", zotero_source="new",
+    )
+
+    assert missing == ["fig.png"]
+    assert w.scan_states()[0].source == "old"
 
 
 def test_commit_generation_owner_conflict_raises(tmp_path):
@@ -293,7 +324,11 @@ def test_commit_generation_markdown_write_failure_rolls_back(tmp_path, monkeypat
     (dest / "fig_1.png").write_bytes(b"OLD")
     md = tmp_path / "Notes" / "cite-K1.md"
     md.parent.mkdir(parents=True, exist_ok=True)
-    md.write_text("---\nzotero_key: \"K1\"\n---\n\n# Old\n\n## 我的笔记\n\n手写内容\n\n## 疑问\n", encoding="utf-8")
+    md.write_text(
+        '---\nzotero_key: "K1"\nzotero_source: "old"\n---\n\n# Old\n\n'
+        '## 我的笔记\n\n手写内容\n\n## 疑问\n',
+        encoding="utf-8",
+    )
     orig = ObsidianWriter._atomic_write  # staticmethod，类访问即底层函数
     calls = {"n": 0}
 
@@ -307,10 +342,14 @@ def test_commit_generation_markdown_write_failure_rolls_back(tmp_path, monkeypat
     src = tmp_path / "fig_1.png"
     src.write_bytes(b"NEW")
     with pytest.raises(OSError):
-        w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n\n新正文\n", [_fig("fig_1.png", src)], zotero_key="K1")
+        w.commit_generation(
+            "cite", '---\nzotero_key: "K1"\n---\n\n# New\n\n新正文\n',
+            [_fig("fig_1.png", src)], zotero_key="K1", zotero_source="new",
+        )
     content = md.read_text(encoding="utf-8")
     assert "手写内容" in content  # 回滚到旧笔记（含手写），不是「旧笔记 + 新图」
     assert "新正文" not in content
+    assert 'zotero_source: "old"' in content
     assert (dest / "fig_1.png").read_bytes() == b"OLD"
     assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
 
@@ -322,7 +361,11 @@ def test_commit_generation_image_swap_failure_rolls_back(tmp_path, monkeypatch):
     (dest / "fig_1.png").write_bytes(b"OLD")
     md = tmp_path / "Notes" / "cite-K1.md"
     md.parent.mkdir(parents=True, exist_ok=True)
-    md.write_text("---\nzotero_key: \"K1\"\n---\n\n# Old\n\n## 我的笔记\n\n手写内容\n\n## 疑问\n", encoding="utf-8")
+    md.write_text(
+        '---\nzotero_key: "K1"\nzotero_source: "old"\n---\n\n# Old\n\n'
+        '## 我的笔记\n\n手写内容\n\n## 疑问\n',
+        encoding="utf-8",
+    )
 
     def boom(dest_dir, staging):
         raise RuntimeError("swap failed")
@@ -331,10 +374,14 @@ def test_commit_generation_image_swap_failure_rolls_back(tmp_path, monkeypatch):
     src = tmp_path / "fig_1.png"
     src.write_bytes(b"NEW")
     with pytest.raises(RuntimeError):
-        w.commit_generation("cite", "---\nzotero_key: \"K1\"\n---\n\n# New\n\n新正文\n", [_fig("fig_1.png", src)], zotero_key="K1")
+        w.commit_generation(
+            "cite", '---\nzotero_key: "K1"\n---\n\n# New\n\n新正文\n',
+            [_fig("fig_1.png", src)], zotero_key="K1", zotero_source="new",
+        )
     content = md.read_text(encoding="utf-8")
     assert "手写内容" in content  # markdown 回滚旧内容
     assert "新正文" not in content
+    assert 'zotero_source: "old"' in content
     assert (dest / "fig_1.png").read_bytes() == b"OLD"  # 图片未切换
     assert not (tmp_path / "Notes" / "images" / "cite-K1.tmp").exists()
 

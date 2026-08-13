@@ -43,7 +43,10 @@ def test_fallback_citation_key_all_ascii():
 def test_to_paper_with_attachment_index():
     att = {
         "key": "ATT1",
-        "data": {"itemType": "attachment", "contentType": "application/pdf", "parentItem": "ITEM1"},
+        "data": {
+            "itemType": "attachment", "contentType": "application/pdf",
+            "parentItem": "ITEM1", "dateModified": "2026-08-12T02:00:00Z",
+        },
         "links": {"enclosure": {"href": "file:///C:/Papers/paper.pdf"}},
     }
     it = {
@@ -57,6 +60,7 @@ def test_to_paper_with_attachment_index():
             "abstractNote": "abs",
             "tags": [{"tag": "sr"}],
             "citationKey": "wang2022",
+            "dateModified": "2026-08-12T01:00:00Z",
             "creators": [{"lastName": "Wang", "firstName": "Li"}],
         },
     }
@@ -68,6 +72,8 @@ def test_to_paper_with_attachment_index():
     assert p["citationKey"] == "wang2022"
     assert p["tags"] == ["sr"]
     assert p["pdf_path"].endswith("paper.pdf")
+    assert p["dateModified"] == "2026-08-12T01:00:00Z"
+    assert p["source_modified"] == "2026-08-12T01:00:00Z|ATT1|2026-08-12T02:00:00Z"
 
 
 def test_fetch_papers_pagination(monkeypatch):
