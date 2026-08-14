@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from obsidian_writer import ObsidianWriter, NotePathConflict, safe_citekey, merge_handwritten
+from core.obsidian_writer import ObsidianWriter, NotePathConflict, safe_citekey, merge_handwritten
 
 
 def _fig(name, src):

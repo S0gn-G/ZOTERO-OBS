@@ -1,4 +1,4 @@
-# 本地真实配置（含个人 API Key / vault 路径），不得入库；仓库提供 config.example.json
+# 本地真实配置（含个人 API Key / vault 路径），不得入库
 config.json
 
 # 本地启动脚本（含 D 盘绝对路径，仅本机用）
@@ -12,3 +12,4 @@ dist/
 __pycache__/
 *.py[cod]
 *.log
+.venv

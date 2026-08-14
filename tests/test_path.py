@@ -1,6 +1,6 @@
 """路径与转义安全测试：citekey、论文标题、图片目录与 YAML 转义。"""
-from obsidian_writer import default_note_filename, safe_citekey, safe_note_title, note_stem
-from note_generator import _yaml_escape, _placeholder_vals
+from core.obsidian_writer import default_note_filename, safe_citekey, safe_note_title, note_stem
+from core.note_generator import _yaml_escape, _placeholder_vals
 
 
 def test_yaml_escape_backslash():

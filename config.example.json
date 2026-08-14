@@ -1,9 +1,0 @@
-{
-  "notes_path": "",
-  "template_path": "",
-  "llm_base_url": "https://api.deepseek.com/v1",
-  "llm_api_key": "",
-  "llm_model": "deepseek-chat",
-  "llm_profile": "",
-  "appearance_mode": "light"
-}

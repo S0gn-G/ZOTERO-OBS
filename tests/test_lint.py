@@ -1,5 +1,5 @@
 """lint_note 单元测试：表格 / 标题 / 必需章节 / 占位符 / 图表引用。"""
-from note_generator import (
+from core.note_generator import (
     _check_table_block,
     _finalize_body,
     _heading_issues,

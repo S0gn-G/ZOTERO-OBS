@@ -10,16 +10,16 @@ from urllib.parse import quote
 import customtkinter as ctk
 from tkinter import messagebox
 
-from config import load_config, save_config, CONFIG_PATH, resource_path
+from core.config import load_config, save_config, CONFIG_PATH, resource_path
 from discovery.core import (
     DiscoveryCandidate,
     DiscoveryKind,
     DiscoveryReport,
     notes_path_for_vault,
 )
-from obsidian_writer import NoteState, ObsidianWriter
-from note_generator import generate_note, load_template, default_template_path, cleanup_figures
-from zotero_client import DEFAULT_BASE_URL, ZoteroClient
+from core.obsidian_writer import NoteState, ObsidianWriter
+from core.note_generator import generate_note, load_template, default_template_path, cleanup_figures
+from core.zotero_client import DEFAULT_BASE_URL, ZoteroClient
 from gui import icons
 from gui import design as ui
 from gui.settings_view import SettingsWindow

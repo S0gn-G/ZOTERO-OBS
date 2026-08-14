@@ -1,5 +1,5 @@
 """zotero_client 单元测试：日期/作者/PDF 路径解析、引文键、附件索引、分页。"""
-from zotero_client import ZoteroClient, _parse_year, _clean_author_name
+from core.zotero_client import ZoteroClient, _parse_year, _clean_author_name
 
 
 def test_parse_year():

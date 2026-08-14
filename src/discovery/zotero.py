@@ -6,7 +6,7 @@ from collections.abc import Callable
 import requests
 
 from discovery.core import DiscoveryCandidate, DiscoveryError, DiscoveryKind
-from zotero_client import DEFAULT_BASE_URL
+from core.zotero_client import DEFAULT_BASE_URL
 
 
 class ZoteroLocalApiProvider:

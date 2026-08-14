@@ -2,7 +2,7 @@
 import customtkinter as ctk
 from tkinter import filedialog
 
-from config import save_config
+from core.config import save_config
 from gui import design as ui
 from gui import icons
 

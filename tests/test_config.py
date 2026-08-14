@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-import config
+from core import config
 
 
 def test_load_config_migrates_old_vault_and_drops_removed_keys(tmp_path, monkeypatch):

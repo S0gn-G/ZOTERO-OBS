@@ -4,7 +4,7 @@ import tempfile
 
 import pytest
 
-import note_generator as ng
+from core import note_generator as ng
 
 
 def _paper(**kw):

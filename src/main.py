@@ -1,7 +1,7 @@
 """入口：运行 ZotNotes GUI。
 
-用法：python main.py
-（若打包为 exe，config.json 会生成在程序同目录）
+用法：python src/main.py
+（若打包为 exe，config.json 会生成在程序同目录的 config/ 下）
 """
 import os
 import sys
@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import customtkinter as ctk
 
-from config import BASE_DIR, load_config, resource_path
+from core.config import BASE_DIR, load_config, resource_path
 from discovery import default_discovery_service
 
 

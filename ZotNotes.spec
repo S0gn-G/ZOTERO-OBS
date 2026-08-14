@@ -1,10 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 # 单文件 exe 打包配置：产物为单个 ZotNotes.exe（自解压运行），
-# 静态资源 theme.json / icon.ico 内置进 exe（运行时经 config.resource_path 回退读取）。
-# config.json / template.md 不内置：首启时在 exe 同目录自动生成/创建，保证用户可编辑。
+# 静态资源 assets/theme.json / assets/icon.ico 内置进 exe（运行时经 config.resource_path 回退读取）。
+# config/config.json / config/template.md 不内置：首启时在 exe 同目录自动生成/创建，保证用户可编辑。
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('theme.json', '.'), ('icon.ico', '.')]
+datas = [('assets/theme.json', 'assets'), ('assets/icon.ico', 'assets')]
 binaries = []
 hiddenimports = []
 for pkg in ('customtkinter', 'pdfplumber', 'pdfminer', 'pymupdf'):
@@ -15,8 +15,8 @@ for pkg in ('customtkinter', 'pdfplumber', 'pdfminer', 'pymupdf'):
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    ['src/main.py'],
+    pathex=['src'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -48,5 +48,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['icon.ico'],
+    icon=['assets/icon.ico'],
 )

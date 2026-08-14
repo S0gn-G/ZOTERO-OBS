@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from gui import app as app_module
 from gui.app import App, _generation_targets, _needs_sync, _obsidian_uri, _zotero_uri
-from obsidian_writer import NoteState
+from core.obsidian_writer import NoteState
 
 
 def _note(source="old", path="C:/Vault/Paper.md"):

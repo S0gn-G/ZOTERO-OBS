@@ -1,8 +1,8 @@
 """_clip_region 图表裁剪几何测试：fig 上探 / 高图 gap / table bbox / 兜底封顶 / Table→Figure 不跳过。"""
 import pytest
 
-import note_generator as ng
-from note_generator import _clip_region, _table_rects, CAPTION_RE, MIN_FIG_H
+from core import note_generator as ng
+from core.note_generator import _clip_region, _table_rects, CAPTION_RE, MIN_FIG_H
 
 
 class R:

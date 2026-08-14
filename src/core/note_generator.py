@@ -22,8 +22,8 @@ from functools import lru_cache
 import fitz
 from openai import OpenAI
 
-from config import BASE_DIR
-from obsidian_writer import default_note_filename, note_stem
+from core.config import BASE_DIR
+from core.obsidian_writer import default_note_filename, note_stem
 
 PDF_MAX_CHARS = 30000  # 深度笔记需要更多证据
 
@@ -237,7 +237,7 @@ def _frontmatter(vals: dict, extra: str | None = None) -> str:
 
 
 def _default_template() -> str:
-    """默认模板正文。需与磁盘 template.md 的结构保持一致。"""
+    """默认模板正文。需与磁盘 config/template.md 的结构保持一致。"""
     vals = {f: "{{zotero:" + f + "}}" for f in FM_ORDER}
     vals["aliases"] = '"{{zotero:title}}"'
     vals["tags"] = "{{zotero:tags}}"
@@ -252,7 +252,7 @@ DEFAULT_TEMPLATE = _default_template()
 
 
 def default_template_path() -> str:
-    return os.path.join(BASE_DIR, "template.md")
+    return os.path.join(BASE_DIR, "config", "template.md")
 
 
 def load_template(cfg: dict) -> str:
@@ -260,6 +260,9 @@ def load_template(cfg: dict) -> str:
     path = (cfg.get("template_path") or "").strip() or default_template_path()
     if not os.path.exists(path):
         try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(DEFAULT_TEMPLATE)
         except OSError:
